@@ -38,9 +38,9 @@ export const MACRO_RATIO = { protein: 0.2, fat: 0.25, carbs: 0.55 }
 export const KCAL_PER_GRAM = { protein: 4, fat: 9, carbs: 4 }
 
 export const MACRO_META = [
-	{ key: 'protein', label: '蛋白质', unit: 'g', color: '#6e90cc' },
-	{ key: 'fat', label: '脂肪', unit: 'g', color: '#d9a45b' },
-	{ key: 'carbs', label: '碳水', unit: 'g', color: '#9c86cc' },
+	{ key: 'protein', label: '蛋白质', unit: 'g', color: '#8fb0e0' },
+	{ key: 'fat', label: '脂肪', unit: 'g', color: '#e8cb8a' },
+	{ key: 'carbs', label: '碳水', unit: 'g', color: '#b5a6e0' },
 ]
 
 /** 可选视觉模型 */

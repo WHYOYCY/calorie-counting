@@ -30,6 +30,9 @@ import {
 	macroGoalsFromKcal,
 	kcalFromMacros,
 	percent,
+	mainItem,
+	mainItemIndex,
+	otherItems,
 } from '../src/core/nutrition.js'
 import {
 	initDB,
@@ -247,6 +250,39 @@ eq(
 eq(kcalFromMacros({ protein: 90, fat: 50, carbs: 248 }), 1802, 'kcalFromMacros 回算热量')
 eq(percent(232, 1800), 13, 'percent 取整')
 eq(percent(100, 0), 0, 'percent 分母为 0 不炸')
+
+group('nutrition.js · 主菜识别（列表标题用）')
+// 一餐：先录了米饭，但真正的主角是滑蛋炒肉片
+const oneMeal = [
+	{ name: '米饭', grams: 200, per100: { kcal: 116, protein: 2.6, fat: 0.3, carbs: 25.9 } }, // 232
+	{ name: '滑蛋炒肉片', grams: 150, per100: { kcal: 180, protein: 12, fat: 10, carbs: 6 } }, // 270
+	{ name: '酸菜', grams: 50, per100: { kcal: 30, protein: 1, fat: 0.2, carbs: 4 } }, // 15
+]
+eq(mainItemIndex(oneMeal), 1, '主菜下标 = 单项热量最高者')
+eq(mainItem(oneMeal).name, '滑蛋炒肉片', '主菜是滑蛋炒肉片，而不是先录入的米饭')
+eq(
+	otherItems(oneMeal).map((i) => i.name),
+	['米饭', '酸菜'],
+	'其余条目作为次级信息，顺序保持不变'
+)
+
+// 热量相同时取克数大的，保证结果确定
+eq(
+	mainItem([
+		{ name: 'A', grams: 100, per100: { kcal: 100 } },
+		{ name: 'B', grams: 200, per100: { kcal: 50 } },
+	]).name,
+	'B',
+	'热量相同时取克数大的'
+)
+eq(mainItem([]), null, '空列表返回 null')
+eq(mainItem(null), null, 'null 输入不报错')
+eq(otherItems([{ name: 'only', grams: 100, per100: { kcal: 10 } }]).length, 0, '只有一项时无次级条目')
+eq(
+	mainItem([{ name: '水', grams: 300, per100: { kcal: 0 } }]).name,
+	'水',
+	'全为 0 热量时仍能选出主菜'
+)
 
 /* ================= db.js ================= */
 group('db.js · 记录归一化')

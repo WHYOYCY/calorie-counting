@@ -160,7 +160,7 @@
 			<view class="between total-row">
 				<text class="total-label">合计</text>
 				<view class="row">
-					<text class="num total-kcal">{{ totals.kcal }}</text>
+					<text class="num total-kcal">{{ round(totals.kcal, 0) }}</text>
 					<text class="total-unit">kcal</text>
 				</view>
 			</view>

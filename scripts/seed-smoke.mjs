@@ -21,7 +21,11 @@ const at = (h, mi) => new Date(now.getFullYear(), now.getMonth(), now.getDate(),
 
 const RICE = { name: '米饭', grams: 200, per100: { kcal: 116, protein: 2.6, fat: 0.3, carbs: 25.9 } }
 const EGG = { name: '鸡蛋', grams: 50, per100: { kcal: 144, protein: 13.3, fat: 8.8, carbs: 2.8 } }
-const KUNGFU = { name: '宫保鸡丁', grams: 150, per100: { kcal: 180, protein: 12, fat: 10, carbs: 9 } }
+const BUN = { name: '小笼包', grams: 150, per100: { kcal: 240, protein: 9, fat: 10, carbs: 28 } }
+const SOYMILK = { name: '豆浆', grams: 250, per100: { kcal: 31, protein: 3, fat: 1.6, carbs: 1.2 } }
+// 这一餐特意让「米饭」不是热量最高的，用来验证列表标题选的是主菜而不是先录入的米饭
+const EGG_MEAT = { name: '滑蛋炒肉片', grams: 150, per100: { kcal: 180, protein: 12, fat: 10, carbs: 6 } }
+const PICKLE = { name: '酸菜', grams: 50, per100: { kcal: 30, protein: 1, fat: 0.2, carbs: 4 } }
 const NOODLE = { name: '面条', grams: 300, per100: { kcal: 137, protein: 4.5, fat: 0.5, carbs: 28 } }
 
 function rec(id, hour, min, meal, items) {
@@ -40,9 +44,10 @@ function rec(id, hour, min, meal, items) {
 	}
 }
 
+// 加餐留空，用来验证「未记录餐次保留淡色占位」的效果
 const RECORDS = [
-	rec('seed-b1', 8, 30, 'breakfast', [RICE, EGG]),
-	rec('seed-l1', 12, 30, 'lunch', [KUNGFU, RICE]),
+	rec('seed-b1', 8, 30, 'breakfast', [BUN, SOYMILK]),
+	rec('seed-l1', 12, 30, 'lunch', [RICE, EGG_MEAT, PICKLE]),
 	rec('seed-d1', 19, 0, 'dinner', [NOODLE]),
 ]
 
@@ -79,6 +84,24 @@ location.replace('/#/pages/index/index');
 
 const out = path.join(DIST, 'seed.html')
 fs.writeFileSync(out, html)
+
+// 顺手算出预期值，方便截图时对照（与 core/nutrition 同一套算式）
+const r1 = (n) => Math.round(n * 10) / 10
+const kcalOf = (items) =>
+	items.reduce((s, it) => r1(s + r1((it.per100.kcal * it.grams) / 100)), 0)
+const per = (mealKey) => {
+	const items = RECORDS.filter((r) => r.meal === mealKey).reduce(
+		(all, r) => all.concat(r.items),
+		[]
+	)
+	return kcalOf(items)
+}
+const total = r1(RECORDS.reduce((s, r) => r1(s + kcalOf(r.items)), 0))
+
 console.log(`✓ 已生成 ${out}`)
 console.log(`  日期键: ${KEY}`)
-console.log('  预期合计: 1217 kcal（早餐 304 / 午餐 502 / 晚餐 411）')
+console.log(`  预期合计: ${total} kcal`)
+console.log(
+	`  分餐次: 早餐 ${per('breakfast')} / 午餐 ${per('lunch')} / 晚餐 ${per('dinner')} / 加餐 ${per('snack')}`
+)
+console.log(`  午餐主菜应为「滑蛋炒肉片」（270），米饭（232）应降为次级标签`)

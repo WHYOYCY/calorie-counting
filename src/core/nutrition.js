@@ -123,3 +123,38 @@ export function groupDigits(n) {
 	}
 	return (neg ? '-' : '') + out
 }
+
+/**
+ * 找出「主菜」的下标 —— 单项热量最高者；热量相同则取克数大的。
+ *
+ * 为什么不用「第一个录入的」：用户往往顺手先加米饭，
+ * 拿米饭当标题会让人误以为这顿只吃了米饭。热量最高的那项才是这顿的主角。
+ */
+export function mainItemIndex(items) {
+	const list = items || []
+	let best = -1
+	let bestKcal = -1
+	let bestGrams = -1
+	for (let i = 0; i < list.length; i++) {
+		const kcal = itemTotals(list[i]).kcal
+		const grams = Number(list[i] && list[i].grams) || 0
+		if (kcal > bestKcal || (kcal === bestKcal && grams > bestGrams)) {
+			best = i
+			bestKcal = kcal
+			bestGrams = grams
+		}
+	}
+	return best
+}
+
+/** 主菜条目（列表主标题用它） */
+export function mainItem(items) {
+	const i = mainItemIndex(items)
+	return i >= 0 ? items[i] : null
+}
+
+/** 除主菜以外的其余条目（列表里作为次级信息） */
+export function otherItems(items) {
+	const i = mainItemIndex(items)
+	return (items || []).filter((_, idx) => idx !== i)
+}

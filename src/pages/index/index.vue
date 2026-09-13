@@ -17,8 +17,8 @@
 		<!-- 仪表盘 -->
 		<view class="card summary">
 			<view class="hero">
-				<text class="hero-num" :class="{ over: isOver }">{{ totals.kcal }}</text>
-				<text class="hero-goal">/ {{ goal }}</text>
+				<text class="hero-num" :class="{ over: isOver }">{{ round(totals.kcal, 0) }}</text>
+				<text class="hero-goal">/ {{ round(goal, 0) }}</text>
 			</view>
 
 			<view class="bar">
@@ -57,20 +57,19 @@
 			</view>
 		</view>
 
-		<!-- 全天无记录 -->
-		<view v-if="!records.length" class="card empty-day">
-			<text class="empty-title">这一天还没有记录</text>
-			<text class="empty-sub">点右下角按钮，拍张照片就能估算热量</text>
-		</view>
-
-		<!-- 餐次列表 -->
-		<view v-else class="list">
-			<view class="meal-block" v-for="g in filledGroups" :key="g.key">
+		<!-- 全日餐次：空餐次保留淡色占位，提醒用户补记 -->
+		<view class="list">
+			<view
+				class="meal-block"
+				v-for="g in groups"
+				:key="g.key"
+				:class="{ blank: !g.records.length, filled: g.records.length }"
+			>
 				<view class="meal-head">
 					<image class="meal-ico" :src="g.icon" mode="aspectFit" />
 					<text class="meal-name grow">{{ g.label }}</text>
-					<text class="meal-kcal">{{ g.totals.kcal }}</text>
-					<text class="meal-unit">kcal</text>
+					<text v-if="g.records.length" class="meal-kcal">{{ round(g.totals.kcal, 0) }}</text>
+					<text v-if="g.records.length" class="meal-unit">kcal</text>
 					<view class="meal-add" @click="addRecord(g.key)">
 						<image class="ico-sm" src="/static/ui/plus.png" mode="aspectFit" />
 					</view>
@@ -86,8 +85,11 @@
 				>
 					<view class="rec-main">
 						<text class="rec-title ellipsis">{{ titleOf(r) }}</text>
-						<view class="rec-tags" v-if="tagsOf(r).length">
-							<text class="rec-tag" v-for="(t, ti) in tagsOf(r)" :key="ti">{{ t }}</text>
+						<view class="rec-sub" v-if="subParts(r).length">
+							<view class="rec-sub-i" v-for="(p, pi) in subParts(r)" :key="pi">
+								<view v-if="p.sep" class="rec-sep"></view>
+								<text v-else class="rec-sub-t">{{ p.name }}</text>
+							</view>
 						</view>
 					</view>
 					<view class="rec-side">
@@ -132,7 +134,15 @@ import { onShow, onHide } from '@dcloudio/uni-app'
 import { MACRO_META, MEALS } from '../../core/constants.js'
 import { addDays, dateLabel, formatTime, parseKey, todayKey } from '../../core/date.js'
 import { getSettings, recordsByDate } from '../../core/db.js'
-import { macroGoalsFromKcal, percent, recordTotals, round, sumRecords } from '../../core/nutrition.js'
+import {
+	macroGoalsFromKcal,
+	mainItem,
+	otherItems,
+	percent,
+	recordTotals,
+	round,
+	sumRecords,
+} from '../../core/nutrition.js'
 import { persistPhoto, pickImage, toBase64 } from '../../core/photo.js'
 import { recognize } from '../../core/ai.js'
 import { setDraft } from '../../core/draft.js'
@@ -193,9 +203,6 @@ const groups = computed(() => {
 	})
 })
 
-/** 只渲染有记录的餐次，减少空壳占位、增强流动感 */
-const filledGroups = computed(() => groups.value.filter((g) => g.records.length))
-
 function refresh() {
 	settings.value = getSettings()
 	records.value = recordsByDate(dateStr.value)
@@ -225,20 +232,28 @@ function backToToday() {
 	refresh()
 }
 
-/* ---------------- 列表展示：主标题 + 配菜标签 + 右侧数据列 ---------------- */
+/* ---------------- 列表展示：主菜做标题，其余作次级信息 ---------------- */
 
 function titleOf(r) {
-	const items = r.items || []
-	return items.length ? items[0].name : '空记录'
+	const m = mainItem(r.items)
+	return m ? m.name : '空记录'
 }
 
-function tagsOf(r) {
-	const rest = (r.items || [])
-		.slice(1)
+/** 其余菜品拼成「带竖线分隔」的次级行，超过 3 项则收成 +N */
+function subParts(r) {
+	const names = otherItems(r.items)
 		.map((i) => i.name)
 		.filter(Boolean)
-	if (rest.length <= 3) return rest
-	return rest.slice(0, 2).concat(`+${rest.length - 2}`)
+	if (!names.length) return []
+	const shown = names.slice(0, 3)
+	const rest = names.length - shown.length
+	const out = []
+	shown.forEach((name, i) => {
+		if (i > 0) out.push({ sep: true })
+		out.push({ sep: false, name })
+	})
+	if (rest > 0) out.push({ sep: false, name: `+${rest}` })
+	return out
 }
 
 function gramsOf(r) {
@@ -249,7 +264,8 @@ function gramsOf(r) {
 }
 
 function kcalOf(r) {
-	return recordTotals(r).kcal
+	// 展示层取整：小数会让大数字看着啰嗦，精度保留在编辑页
+	return round(recordTotals(r).kcal, 0)
 }
 
 function editRecord(r) {
@@ -428,13 +444,13 @@ function fallbackToManual(title, content) {
 		justify-content: center;
 	}
 
-	/* 细字重 + 等宽数字，去掉千分位逗号，显得轻盈 */
+	/* 字重加到 600，让大数字成为页面视觉锚点 */
 	.hero-num {
 		font-family: $ff-num;
-		font-size: 100rpx;
-		font-weight: 300;
+		font-size: 94rpx;
+		font-weight: 600;
 		line-height: 1;
-		letter-spacing: -1rpx;
+		letter-spacing: -1.5rpx;
 	}
 
 	.hero-num.over {
@@ -557,32 +573,16 @@ function fallbackToManual(title, content) {
 		flex-shrink: 0;
 	}
 
-	/* ---------- 空状态 ---------- */
-	.empty-day {
-		margin-top: $s-3;
-		padding: $s-6 $s-4;
-		text-align: center;
-	}
-
-	.empty-title {
-		display: block;
-		font-size: 28rpx;
-		color: $c-text-sub;
-	}
-
-	.empty-sub {
-		display: block;
-		font-size: 22rpx;
-		color: $c-text-mute;
-		margin-top: 8rpx;
-	}
-
 	/* ---------- 餐次 ---------- */
 	.list {
-		margin-top: $s-5;
+		margin-top: $s-4;
 	}
 
-	.meal-block + .meal-block {
+	.meal-block {
+		margin-top: $s-4;
+	}
+
+	.meal-block.filled {
 		margin-top: $s-5;
 	}
 
@@ -590,6 +590,25 @@ function fallbackToManual(title, content) {
 		display: flex;
 		align-items: center;
 		padding: 0 4rpx $s-2;
+	}
+
+	/* 未记录的餐次：整体压淡，只留引导作用（类名避开全局 .empty） */
+	.meal-block.blank .meal-ico {
+		opacity: 0.32;
+	}
+
+	.meal-block.blank .meal-name {
+		color: $c-text-mute;
+		font-weight: 500;
+	}
+
+	.meal-block.blank .meal-head {
+		padding-bottom: 0;
+	}
+
+	.meal-block.blank .meal-add {
+		background: rgba(255, 255, 255, 0.7);
+		box-shadow: none;
 	}
 
 	.meal-ico {
@@ -663,22 +682,36 @@ function fallbackToManual(title, content) {
 		line-height: 1.35;
 	}
 
-	.rec-tags {
+	/* 次级菜品：纯文字 + 竖线分隔，比胶囊标签干净 */
+	.rec-sub {
 		display: flex;
-		flex-wrap: wrap;
-		margin-top: 9rpx;
+		align-items: center;
+		flex-wrap: nowrap;
+		overflow: hidden;
+		margin-top: 7rpx;
 	}
 
-	.rec-tag {
-		font-size: 20rpx;
-		color: $c-text-sub;
-		background: $c-fill;
-		border-radius: $r-pill;
-		padding: 3rpx 13rpx;
-		margin: 0 8rpx 4rpx 0;
+	.rec-sub-i {
+		display: flex;
+		align-items: center;
+		flex-shrink: 0;
 	}
 
-	/* 右侧数据列：热量是焦点，时间与重量退到次级 */
+	.rec-sub-t {
+		font-size: 22rpx;
+		color: $c-text-mute;
+		white-space: nowrap;
+	}
+
+	.rec-sep {
+		width: 2rpx;
+		height: 18rpx;
+		background: $c-line-strong;
+		margin: 0 10rpx;
+		flex-shrink: 0;
+	}
+
+	/* 右侧数据列：热量降权（字号减小 + 转灰），让菜名成为主角 */
 	.rec-side {
 		text-align: right;
 		margin-left: $s-3;
@@ -688,10 +721,10 @@ function fallbackToManual(title, content) {
 	.rec-kcal {
 		display: block;
 		font-family: $ff-num;
-		font-size: 36rpx;
-		font-weight: 700;
-		line-height: 1.1;
-		letter-spacing: -0.5rpx;
+		font-size: 32rpx;
+		font-weight: 600;
+		line-height: 1.15;
+		color: $c-text-sub;
 	}
 
 	.rec-meta {
@@ -771,12 +804,13 @@ function fallbackToManual(title, content) {
 		background: $c-primary-tint;
 	}
 
+	/* 降饱和 + 双层投影，让它有层次但不突兀 */
 	.fab {
 		width: 108rpx;
 		height: 108rpx;
 		border-radius: $r-pill;
-		background: linear-gradient(135deg, #63b795, $c-primary);
-		box-shadow: 0 10rpx 26rpx rgba(82, 169, 138, 0.34);
+		background: linear-gradient(135deg, #79bda6, #4f9e82);
+		box-shadow: 0 3rpx 8rpx rgba(28, 39, 51, 0.07), 0 14rpx 32rpx rgba(79, 158, 130, 0.24);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -785,8 +819,8 @@ function fallbackToManual(title, content) {
 
 	.fab.open {
 		transform: rotate(90deg);
-		background: linear-gradient(135deg, #7b8896, #5d6b78);
-		box-shadow: 0 10rpx 26rpx rgba(93, 107, 120, 0.28);
+		background: linear-gradient(135deg, #8a97a4, #66737f);
+		box-shadow: 0 3rpx 8rpx rgba(28, 39, 51, 0.08), 0 14rpx 32rpx rgba(102, 115, 127, 0.22);
 	}
 
 	.fab:active {
