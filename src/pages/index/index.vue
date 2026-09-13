@@ -366,14 +366,16 @@ function fallbackToManual(title, content) {
 
 <style lang="scss" scoped>
 	.page {
-		padding: $s-3 $s-4 200rpx;
+		/* 首页导航栏已隐藏（navigationStyle: custom），自行避开状态栏 */
+		padding: 0 $s-4 200rpx;
+		padding-top: var(--status-bar-height, 0px);
 	}
 
 	/* ---------- 日期切换 ---------- */
 	.head {
 		display: flex;
 		align-items: center;
-		padding: $s-2 0 $s-4;
+		padding: $s-3 0 $s-4;
 	}
 
 	.nav {
