@@ -19,3 +19,4 @@ unpackage-res/
 Thumbs.db
 .idea/
 *.log
+.shots/

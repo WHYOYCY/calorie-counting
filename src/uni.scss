@@ -76,40 +76,63 @@ $uni-color-paragraph: #3F536E; // 文章段落颜色
 $uni-font-size-paragraph:15px;
 
 /* ============================================================
-   卡路里记录 · 主题变量
+   卡路里记录 · 设计令牌
    （uni-app 会把本文件自动注入所有 scss 样式块，无需手动 import）
    ============================================================ */
 
-/* 主色 */
-$c-primary: #22c55e;
-$c-primary-dark: #16a34a;
-$c-primary-weak: #e9f9ef;
+/* ---------- 品牌主色：低饱和祖母绿，克制不刺眼 ---------- */
+$c-primary: #0fa36b;
+$c-primary-dark: #0b7f53;
+$c-primary-weak: #e8f6f0;
+$c-primary-tint: #f3faf7;
 
-/* 语义色 */
-$c-danger: #ef4444;
-$c-danger-weak: #fef2f2;
-$c-warn: #f59e0b;
-$c-blue: #3b82f6;
-$c-purple: #8b5cf6;
+/* ---------- 语义色 ---------- */
+$c-danger: #f04438;
+$c-danger-weak: #fef2f1;
+$c-warn: #f79009;
 
-/* 文字 */
-$c-text: #1f2937;
-$c-text-sub: #6b7280;
-$c-text-mute: #9ca3af;
+/* ---------- 数据可视化配色：同明度层，避免花 ---------- */
+$c-protein: #4c7df0;
+$c-fat: #f0a132;
+$c-carbs: #8b6ff0;
 
-/* 背景与描边 */
-$c-bg: #f4f6f7;
+/* ---------- 中性色：带一点冷调，比纯灰更干净 ---------- */
+$c-text: #16202a;
+$c-text-sub: #5b6b7a;
+$c-text-mute: #9aa6b2;
+$c-line: #eef1f4;
+$c-line-strong: #e2e8ee;
+$c-fill: #f4f6f8;
+$c-bg: #f6f7f9;
 $c-card: #ffffff;
-$c-border: #eef0f2;
-$c-border-strong: #e2e6e9;
 
-/* 圆角 */
-$radius-sm: 12rpx;
-$radius: 20rpx;
-$radius-lg: 28rpx;
+/* ---------- 圆角 ---------- */
+$r-xs: 8rpx;
+$r-sm: 14rpx;
+$r-md: 24rpx;
+$r-lg: 32rpx;
+$r-pill: 999rpx;
 
-/* 间距 */
-$gap-sm: 12rpx;
-$gap: 24rpx;
-$gap-lg: 32rpx;
+/* ---------- 间距（4 的倍数，节奏统一） ---------- */
+$s-1: 8rpx;
+$s-2: 16rpx;
+$s-3: 24rpx;
+$s-4: 32rpx;
+$s-5: 40rpx;
+$s-6: 56rpx;
+
+/* ---------- 阴影：极轻，只做分层不加脏 ---------- */
+$sh-1: 0 1rpx 2rpx rgba(22, 32, 42, 0.04);
+$sh-2: 0 2rpx 10rpx rgba(22, 32, 42, 0.05);
+$sh-3: 0 10rpx 30rpx rgba(22, 32, 42, 0.07);
+
+/* ---------- 兼容旧变量名 ---------- */
+$c-border: $c-line;
+$c-border-strong: $c-line-strong;
+$radius-sm: $r-sm;
+$radius: $r-md;
+$radius-lg: $r-lg;
+$gap-sm: $s-2;
+$gap: $s-3;
+$gap-lg: $s-4;
 

@@ -369,42 +369,45 @@ function doClear() {
 
 <style lang="scss" scoped>
 	.page {
-		padding: $gap;
-		padding-bottom: 60rpx;
+		padding: $s-3 $s-4 $s-6;
 	}
 
+	/* ---------- 分区标题 ---------- */
 	.sec-title {
 		display: block;
-		font-size: 30rpx;
+		font-size: 25rpx;
 		font-weight: 600;
-		margin-bottom: $gap-sm;
+		color: $c-text-sub;
+		letter-spacing: 0.5rpx;
+		margin-bottom: $s-3;
 	}
 
+	/* ---------- 表单行 ---------- */
 	.field {
 		display: flex;
 		align-items: center;
-		padding: 14rpx 0;
+		padding: 13rpx 0;
 	}
 
 	.label {
-		width: 190rpx;
+		width: 210rpx;
 		flex-shrink: 0;
-		font-size: 27rpx;
+		font-size: 26rpx;
 		color: $c-text-sub;
 	}
 
 	.input-wrap {
 		flex: 1;
-		background: #f6f7f8;
-		border-radius: $radius-sm;
-		padding: 0 16rpx;
-		height: 68rpx;
+		background: $c-fill;
+		border-radius: $r-sm;
+		padding: 0 18rpx;
+		height: 72rpx;
 	}
 
 	.input {
 		flex: 1;
-		font-size: 28rpx;
-		height: 68rpx;
+		font-size: 27rpx;
+		height: 72rpx;
 	}
 
 	.input[disabled] {
@@ -412,59 +415,66 @@ function doClear() {
 	}
 
 	.eye {
-		font-size: 24rpx;
+		font-size: 23rpx;
+		font-weight: 500;
 		color: $c-primary-dark;
-		padding-left: 12rpx;
+		padding-left: 14rpx;
 	}
 
 	.suffix {
-		font-size: 24rpx;
+		font-size: 23rpx;
 		color: $c-text-mute;
 		padding-left: 8rpx;
 	}
 
 	.picker {
-		background: #f6f7f8;
-		border-radius: $radius-sm;
-		padding: 16rpx;
-		font-size: 28rpx;
+		background: $c-fill;
+		border-radius: $r-sm;
+		padding: 16rpx 18rpx;
+		font-size: 27rpx;
 	}
 
 	.ph {
-		color: #c8ccd0;
+		color: #c3ccd5;
 	}
 
 	.hint {
 		display: block;
-		line-height: 1.6;
-		padding: 2rpx 0 10rpx;
+		font-size: 21rpx;
+		line-height: 1.65;
+		color: $c-text-mute;
+		padding: 2rpx 0 12rpx;
 	}
 
+	/* ---------- 按钮组 ---------- */
 	.row-btns {
 		display: flex;
-		margin-top: $gap-sm;
+		margin-top: $s-3;
+	}
+
+	.row-btns .btn + .btn {
+		margin-left: $s-2;
 	}
 
 	.test-row {
 		margin-top: 0;
-		padding-bottom: 10rpx;
-	}
-
-	.row-btns .btn + .btn {
-		margin-left: $gap-sm;
+		padding-bottom: 4rpx;
 	}
 
 	.clear-btn {
-		margin-top: $gap-sm;
+		margin-top: $s-2;
 	}
 
+	/* ---------- 关于 ---------- */
 	.about-row {
-		padding: 14rpx 0;
-		border-top: 1rpx solid $c-border;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 15rpx 0;
 	}
 
-	.about-row:first-of-type {
-		border-top: none;
+	.about-row + .about-row {
+		border-top: 1rpx solid $c-line;
 	}
 
 	/* ---------- 导入弹层 ---------- */
@@ -474,35 +484,36 @@ function doClear() {
 		right: 0;
 		top: 0;
 		bottom: 0;
-		background: rgba(0, 0, 0, 0.4);
+		background: rgba(22, 32, 42, 0.45);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		padding: $gap-lg;
+		padding: $s-4;
 		z-index: 99;
 	}
 
 	.dialog {
 		width: 100%;
 		background: #fff;
-		border-radius: $radius-lg;
-		padding: $gap-lg;
+		border-radius: $r-lg;
+		padding: $s-4;
+		box-shadow: $sh-3;
 	}
 
 	.dialog-title {
 		display: block;
 		font-size: 32rpx;
 		font-weight: 600;
-		margin-bottom: 8rpx;
+		margin-bottom: 6rpx;
 	}
 
 	.paste {
 		width: 100%;
-		height: 260rpx;
-		background: #f6f7f8;
-		border-radius: $radius-sm;
-		padding: 16rpx;
-		font-size: 24rpx;
-		margin: $gap-sm 0;
+		height: 280rpx;
+		background: $c-fill;
+		border-radius: $r-sm;
+		padding: 18rpx;
+		font-size: 23rpx;
+		margin: $s-2 0 $s-3;
 	}
 </style>

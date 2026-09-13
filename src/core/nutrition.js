@@ -110,3 +110,16 @@ export function percent(value, total, max = Infinity) {
 	const p = ((Number(value) || 0) / t) * 100
 	return Math.min(round(p, 0), max)
 }
+
+/** 千分位分组：1217 → '1,217'（让大数字更易读） */
+export function groupDigits(n) {
+	const v = Math.round(Number(n) || 0)
+	const neg = v < 0
+	const s = String(Math.abs(v))
+	let out = ''
+	for (let i = 0; i < s.length; i++) {
+		if (i > 0 && (s.length - i) % 3 === 0) out += ','
+		out += s[i]
+	}
+	return (neg ? '-' : '') + out
+}

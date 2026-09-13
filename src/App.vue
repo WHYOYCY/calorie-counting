@@ -19,7 +19,8 @@
 		background-color: $c-bg;
 		color: $c-text;
 		font-size: 28rpx;
-		line-height: 1.5;
+		line-height: 1.55;
+		-webkit-font-smoothing: antialiased;
 	}
 
 	view,
@@ -35,11 +36,6 @@
 	.row {
 		display: flex;
 		align-items: center;
-	}
-
-	.row-top {
-		display: flex;
-		align-items: flex-start;
 	}
 
 	.between {
@@ -69,15 +65,16 @@
 		text-overflow: ellipsis;
 	}
 
-	/* ---------- 卡片 ---------- */
+	/* ---------- 卡片：靠阴影分层，不靠描边 ---------- */
 	.card {
 		background: $c-card;
-		border-radius: $radius;
-		padding: $gap;
+		border-radius: $r-md;
+		padding: $s-4;
+		box-shadow: $sh-1;
 	}
 
 	.card + .card {
-		margin-top: $gap;
+		margin-top: $s-3;
 	}
 
 	/* ---------- 文字 ---------- */
@@ -90,23 +87,31 @@
 	}
 
 	.t-sm {
-		font-size: 24rpx;
+		font-size: 25rpx;
 	}
 
 	.t-xs {
 		font-size: 22rpx;
 	}
 
-	.t-lg {
-		font-size: 34rpx;
-	}
-
 	.t-bold {
 		font-weight: 600;
 	}
 
+	/* 数字统一用等宽数字，避免跳动 */
 	.num {
 		font-variant-numeric: tabular-nums;
+		font-feature-settings: 'tnum';
+	}
+
+	/* ---------- 分区标题 ---------- */
+	.sec {
+		display: block;
+		font-size: 25rpx;
+		font-weight: 600;
+		color: $c-text-sub;
+		letter-spacing: 1rpx;
+		margin-bottom: $s-3;
 	}
 
 	/* ---------- 按钮 ---------- */
@@ -114,28 +119,32 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		height: 88rpx;
-		border-radius: 44rpx;
-		font-size: 30rpx;
+		height: 92rpx;
+		border-radius: $r-md;
+		font-size: 29rpx;
 		font-weight: 500;
+		transition: opacity 0.15s, transform 0.15s;
 	}
 
 	.btn:active {
-		opacity: 0.85;
+		opacity: 0.82;
+		transform: scale(0.985);
 	}
 
 	.btn-primary {
 		background: $c-primary;
 		color: #fff;
+		box-shadow: 0 6rpx 18rpx rgba(15, 163, 107, 0.22);
 	}
 
 	.btn-ghost {
-		background: $c-primary-weak;
-		color: $c-primary-dark;
+		background: $c-card;
+		color: $c-text;
+		box-shadow: $sh-1;
 	}
 
 	.btn-plain {
-		background: #f3f4f6;
+		background: $c-fill;
 		color: $c-text-sub;
 	}
 
@@ -144,14 +153,32 @@
 		color: $c-danger;
 	}
 
-	.btn[disabled],
 	.btn.disabled {
 		opacity: 0.5;
 	}
 
+	/* ---------- 图标 ---------- */
+	.ico {
+		width: 36rpx;
+		height: 36rpx;
+		flex-shrink: 0;
+	}
+
+	.ico-sm {
+		width: 28rpx;
+		height: 28rpx;
+		flex-shrink: 0;
+	}
+
+	.ico-lg {
+		width: 44rpx;
+		height: 44rpx;
+		flex-shrink: 0;
+	}
+
 	/* ---------- 空状态 ---------- */
 	.empty {
-		padding: 90rpx 0;
+		padding: 80rpx 0;
 		text-align: center;
 		color: $c-text-mute;
 		font-size: 26rpx;

@@ -57,7 +57,9 @@
 						placeholder-class="ph"
 						@input="onText(i, 'name', $event)"
 					/>
-					<view class="del" @click="removeItem(i)">✕</view>
+					<view class="del" @click="removeItem(i)">
+						<image class="ico-sm" src="/static/ui/close.png" mode="aspectFit" />
+					</view>
 				</view>
 
 				<view class="food-row">
@@ -123,7 +125,10 @@
 				</view>
 			</view>
 
-			<view class="add t-sm" @click="addBlank">＋ 添加一行</view>
+			<view class="add" @click="addBlank">
+				<image class="ico-sm" src="/static/ui/plus.png" mode="aspectFit" />
+				<text class="add-t">添加一行</text>
+			</view>
 		</view>
 
 		<!-- 最近吃过 -->
@@ -152,14 +157,17 @@
 
 		<!-- 合计 -->
 		<view class="card">
-			<view class="between">
-				<text class="t-sub">合计</text>
-				<text class="num total-kcal">{{ totals.kcal }} kcal</text>
+			<view class="between total-row">
+				<text class="total-label">合计</text>
+				<view class="row">
+					<text class="num total-kcal">{{ totals.kcal }}</text>
+					<text class="total-unit">kcal</text>
+				</view>
 			</view>
-			<view class="between t-xs t-mute macro-line">
-				<text class="num">蛋白 {{ totals.protein }}g</text>
-				<text class="num">脂肪 {{ totals.fat }}g</text>
-				<text class="num">碳水 {{ totals.carbs }}g</text>
+			<view class="between macro-line">
+				<text class="num">蛋白质 {{ totals.protein }} g</text>
+				<text class="num">脂肪 {{ totals.fat }} g</text>
+				<text class="num">碳水 {{ totals.carbs }} g</text>
 			</view>
 		</view>
 
@@ -433,12 +441,14 @@ function remove() {
 
 <style lang="scss" scoped>
 	.page {
-		padding: $gap;
+		padding: $s-3 $s-4 $s-6;
 	}
 
 	.label {
-		font-size: 26rpx;
+		font-size: 25rpx;
+		font-weight: 600;
 		color: $c-text-sub;
+		letter-spacing: 0.5rpx;
 	}
 
 	/* ---------- 识别照片 ---------- */
@@ -450,27 +460,30 @@ function remove() {
 
 	.photo {
 		width: 100%;
-		height: 380rpx;
+		height: 400rpx;
 		display: block;
 	}
 
 	.photo-tag {
 		position: absolute;
-		right: 16rpx;
-		top: 16rpx;
-		background: rgba(34, 197, 94, 0.92);
+		right: $s-3;
+		top: $s-3;
+		background: rgba(15, 163, 107, 0.94);
 		color: #fff;
-		font-size: 22rpx;
-		padding: 6rpx 16rpx;
-		border-radius: 20rpx;
+		font-size: 21rpx;
+		font-weight: 500;
+		padding: 7rpx 18rpx;
+		border-radius: $r-pill;
 	}
 
 	.head {
-		margin-bottom: 8rpx;
+		margin-bottom: $s-3;
 	}
 
 	.toggle {
+		font-size: 24rpx;
 		color: $c-primary-dark;
+		font-weight: 500;
 	}
 
 	/* ---------- 时间 / 餐次 ---------- */
@@ -481,7 +494,7 @@ function remove() {
 	}
 
 	.field .label {
-		width: 100rpx;
+		width: 110rpx;
 		flex-shrink: 0;
 	}
 
@@ -490,11 +503,11 @@ function remove() {
 	}
 
 	.picker {
-		background: #f6f7f8;
-		border-radius: $radius-sm;
-		padding: 12rpx 20rpx;
-		font-size: 28rpx;
-		margin-left: $gap-sm;
+		background: $c-fill;
+		border-radius: $r-sm;
+		padding: 14rpx 22rpx;
+		font-size: 27rpx;
+		margin-left: $s-2;
 	}
 
 	.chips {
@@ -504,15 +517,15 @@ function remove() {
 	.chip {
 		flex: 1;
 		text-align: center;
-		padding: 12rpx 0;
-		font-size: 26rpx;
-		border: 1rpx solid $c-border-strong;
-		border-radius: $radius-sm;
+		padding: 14rpx 0;
+		font-size: 25rpx;
+		background: $c-fill;
+		border-radius: $r-sm;
 		color: $c-text-sub;
 	}
 
 	.chip + .chip {
-		margin-left: $gap-sm;
+		margin-left: 10rpx;
 	}
 
 	.chip.on {
@@ -521,13 +534,18 @@ function remove() {
 	}
 
 	.tip {
-		padding: 4rpx 0 0 100rpx;
+		display: block;
+		font-size: 21rpx;
+		color: $c-text-mute;
+		padding: 6rpx 0 0 110rpx;
 	}
 
 	/* ---------- 食物条目 ---------- */
 	.food {
-		padding: $gap 0;
-		border-top: 1rpx solid $c-border;
+		margin-top: $s-3;
+		padding: $s-3;
+		border: 1rpx solid $c-line;
+		border-radius: $r-sm;
 	}
 
 	.food-head {
@@ -536,85 +554,102 @@ function remove() {
 	}
 
 	.name-input {
-		font-size: 30rpx;
+		font-size: 29rpx;
+		font-weight: 500;
 		height: 56rpx;
 	}
 
 	.del {
-		width: 56rpx;
-		height: 56rpx;
+		width: 52rpx;
+		height: 52rpx;
+		margin-left: $s-2;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: $c-text-mute;
-		font-size: 26rpx;
+		border-radius: $r-pill;
+		background: $c-fill;
+	}
+
+	.del:active {
+		background: $c-danger-weak;
 	}
 
 	.food-row {
 		display: flex;
 		align-items: center;
-		margin-top: $gap-sm;
+		margin-top: $s-2;
 	}
 
 	.mini-field {
 		display: flex;
 		align-items: center;
-		background: #f6f7f8;
-		border-radius: $radius-sm;
+		background: $c-fill;
+		border-radius: $r-xs;
 		padding: 0 16rpx;
-		height: 64rpx;
-		margin-right: $gap-sm;
+		height: 66rpx;
+		margin-right: 10rpx;
 		flex: 1;
 	}
 
 	.mini-input {
 		flex: 1;
-		min-width: 40rpx;
-		font-size: 28rpx;
-		height: 64rpx;
+		min-width: 30rpx;
+		font-size: 27rpx;
+		height: 66rpx;
 	}
 
 	.unit {
-		font-size: 22rpx;
+		font-size: 21rpx;
 		color: $c-text-mute;
 		margin-left: 6rpx;
 		flex-shrink: 0;
 	}
 
 	.food-kcal {
-		min-width: 100rpx;
+		min-width: 96rpx;
 		text-align: right;
-		font-size: 30rpx;
+		font-size: 29rpx;
+		font-weight: 600;
 		color: $c-primary-dark;
 	}
 
 	.ph {
-		color: #c8ccd0;
+		color: #c3ccd5;
 	}
 
 	.add {
-		color: $c-primary-dark;
-		text-align: center;
-		padding: 20rpx 0 4rpx;
-		border-top: 1rpx solid $c-border;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		margin-top: $s-3;
+		padding: 20rpx 0;
+		border-radius: $r-sm;
+		background: $c-primary-tint;
 	}
 
 	.add:active {
-		opacity: 0.7;
+		background: $c-primary-weak;
+	}
+
+	.add-t {
+		font-size: 25rpx;
+		color: $c-primary-dark;
+		font-weight: 500;
+		margin-left: 8rpx;
 	}
 
 	/* ---------- 最近吃过 ---------- */
 	.recents {
 		display: flex;
 		flex-wrap: wrap;
-		margin-top: $gap-sm;
+		margin-top: $s-2;
 	}
 
 	.recent {
-		background: #f6f7f8;
-		border-radius: $radius-sm;
-		padding: 12rpx 18rpx;
-		margin: 0 $gap-sm $gap-sm 0;
+		background: $c-fill;
+		border-radius: $r-sm;
+		padding: 12rpx 20rpx;
+		margin: 0 10rpx 10rpx 0;
 		max-width: 100%;
 	}
 
@@ -625,28 +660,49 @@ function remove() {
 	/* ---------- 备注 ---------- */
 	.note {
 		width: 100%;
-		height: 120rpx;
-		font-size: 28rpx;
-		margin-top: $gap-sm;
-		background: #f6f7f8;
-		border-radius: $radius-sm;
-		padding: 16rpx;
+		height: 130rpx;
+		font-size: 27rpx;
+		margin-top: $s-2;
+		background: $c-fill;
+		border-radius: $r-sm;
+		padding: 18rpx;
 	}
 
 	/* ---------- 合计 ---------- */
+	.total-row {
+		align-items: baseline;
+	}
+
+	.total-label {
+		font-size: 25rpx;
+		font-weight: 600;
+		color: $c-text-sub;
+	}
+
 	.total-kcal {
-		font-size: 40rpx;
+		font-size: 46rpx;
 		font-weight: 700;
+		letter-spacing: -1rpx;
 		color: $c-primary-dark;
 	}
 
+	.total-unit {
+		font-size: 22rpx;
+		color: $c-text-mute;
+		margin-left: 8rpx;
+	}
+
 	.macro-line {
-		margin-top: 8rpx;
+		margin-top: $s-2;
+		padding-top: $s-2;
+		border-top: 1rpx solid $c-line;
+		font-size: 21rpx;
+		color: $c-text-mute;
 	}
 
 	/* ---------- 底部 ---------- */
 	.holder {
-		height: 180rpx;
+		height: 190rpx;
 	}
 
 	.bottom {
@@ -655,14 +711,14 @@ function remove() {
 		right: 0;
 		bottom: 0;
 		display: flex;
-		padding: $gap;
-		background: rgba(255, 255, 255, 0.96);
-		border-top: 1rpx solid $c-border;
+		padding: $s-3 $s-4;
+		background: #fff;
+		box-shadow: 0 -4rpx 24rpx rgba(22, 32, 42, 0.06);
 	}
 
 	.del-btn {
-		width: 180rpx;
+		width: 176rpx;
 		flex-shrink: 0;
-		margin-right: $gap;
+		margin-right: $s-3;
 	}
 </style>

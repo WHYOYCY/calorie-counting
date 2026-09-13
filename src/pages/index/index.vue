@@ -1,81 +1,100 @@
 <template>
 	<view class="page">
 		<!-- 日期切换 -->
-		<view class="datebar">
-			<view class="navbtn" @click="shift(-1)"><text class="chev">‹</text></view>
-			<view class="dateinfo" @click="backToToday">
-				<text class="dtoday">{{ headLabel }}</text>
-				<text class="dsub">{{ subLabel }}</text>
+		<view class="head">
+			<view class="nav" @click="shift(-1)">
+				<image class="ico-sm flip" src="/static/ui/chevron.png" mode="aspectFit" />
 			</view>
-			<view class="navbtn" :class="{ dim: isToday }" @click="shift(1)"><text class="chev">›</text></view>
+			<view class="head-mid" @click="backToToday">
+				<text class="head-title">{{ headLabel }}</text>
+				<text class="head-sub">{{ subLabel }}</text>
+			</view>
+			<view class="nav" :class="{ off: isToday }" @click="shift(1)">
+				<image class="ico-sm" src="/static/ui/chevron.png" mode="aspectFit" />
+			</view>
 		</view>
 
-		<!-- 汇总卡 -->
+		<!-- 今日汇总 -->
 		<view class="card summary">
-			<view class="kcal-row">
-				<text class="kcal num" :class="{ over: isOver }">{{ totals.kcal }}</text>
-				<text class="kcal-goal num">/ {{ goal }} kcal</text>
+			<view class="hero">
+				<text class="hero-num num" :class="{ over: isOver }">{{ groupDigits(totals.kcal) }}</text>
+				<text class="hero-goal num">/ {{ groupDigits(goal) }}</text>
 			</view>
 
 			<view class="bar">
 				<view class="bar-fill" :class="{ over: isOver }" :style="{ width: pct + '%' }"></view>
 			</view>
 
-			<view class="between hint">
-				<text v-if="!isOver" class="t-sub">还可以吃 <text class="num t-bold">{{ remain }}</text> kcal</text>
-				<text v-else class="over-text">已超出 <text class="num t-bold">{{ -remain }}</text> kcal</text>
+			<view class="between hero-hint">
+				<text v-if="!isOver" class="t-sm t-sub">
+					还可以吃 <text class="num t-bold">{{ groupDigits(remain) }}</text> kcal
+				</text>
+				<text v-else class="t-sm over-text">
+					已超出 <text class="num t-bold">{{ groupDigits(-remain) }}</text> kcal
+				</text>
 				<text class="t-xs t-mute num">{{ records.length }} 条记录</text>
 			</view>
 
-			<view class="macros">
-				<view class="macro" v-for="m in macroRows" :key="m.key">
-					<view class="between macro-head">
-						<text class="t-xs t-sub">{{ m.label }}</text>
-						<text class="t-xs t-mute num">{{ m.value }}/{{ m.goal }}g</text>
-					</view>
-					<view class="mini-bar">
-						<view class="mini-fill" :style="{ width: m.pct + '%', background: m.color }"></view>
-					</view>
+			<view class="hr"></view>
+
+			<view class="macro" v-for="m in macroRows" :key="m.key">
+				<text class="macro-label">{{ m.label }}</text>
+				<view class="macro-bar">
+					<view
+						class="macro-fill"
+						:style="{ width: m.pct + '%', background: m.color }"
+					></view>
 				</view>
+				<text class="macro-val num">
+					{{ m.value }}<text class="macro-goal">/{{ m.goal }}</text>
+				</text>
 			</view>
 		</view>
 
 		<!-- 操作 -->
 		<view class="actions">
 			<view class="btn btn-primary grow" @click="shoot">
-				<text class="cam">📷</text>
-				<text>拍照识别</text>
+				<image class="ico" src="/static/ui/camera.png" mode="aspectFit" />
+				<text class="act-label">拍照识别</text>
 			</view>
-			<view class="btn btn-ghost grow" @click="addRecord('')">手动添加</view>
+			<view class="btn btn-ghost grow" @click="addRecord('')">
+				<image class="ico" src="/static/ui/plus.png" mode="aspectFit" />
+				<text class="act-label">手动添加</text>
+			</view>
 		</view>
 
 		<!-- 餐次分组 -->
-		<view class="card meal" v-for="g in groups" :key="g.key">
-			<view class="between meal-head">
-				<view class="row">
-					<text class="meal-tag" :style="{ background: g.color }">{{ g.short }}</text>
-					<text class="meal-name">{{ g.label }}</text>
-				</view>
-				<text class="num t-sub t-sm">{{ g.totals.kcal }} kcal</text>
-			</view>
-
-			<view v-if="g.records.length" class="list">
-				<view class="item" v-for="r in g.records" :key="r.id" @click="editRecord(r)">
-					<view class="grow">
-						<text class="item-name ellipsis">{{ itemNames(r) }}</text>
-						<text class="t-xs t-mute num">{{ formatTime(r.ts) }} · {{ gramsOf(r) }}g</text>
+		<view class="card meals">
+			<view class="meal" v-for="(g, gi) in groups" :key="g.key" :class="{ first: gi === 0 }">
+				<view class="meal-head">
+					<view class="meal-dot" :style="{ background: g.color }"></view>
+					<text class="meal-name grow">{{ g.label }}</text>
+					<text v-if="g.totals.kcal" class="meal-kcal num">{{ groupDigits(g.totals.kcal) }}</text>
+					<text v-if="g.totals.kcal" class="meal-unit">kcal</text>
+					<view class="meal-add" @click="addRecord(g.key)">
+						<image class="ico-sm" src="/static/ui/plus.png" mode="aspectFit" />
 					</view>
-					<text class="num item-kcal">{{ kcalOf(r) }}</text>
-					<text class="arrow">›</text>
+				</view>
+
+				<view
+					class="rec"
+					v-for="r in g.records"
+					:key="r.id"
+					@click="editRecord(r)"
+					hover-class="rec-hover"
+				>
+					<view class="grow">
+						<text class="rec-name ellipsis">{{ itemNames(r) }}</text>
+						<text class="rec-meta num">{{ formatTime(r.ts) }} · {{ gramsOf(r) }} g</text>
+					</view>
+					<text class="rec-kcal num">{{ kcalOf(r) }}</text>
+					<image class="ico-sm rec-arrow" src="/static/ui/chevron.png" mode="aspectFit" />
 				</view>
 			</view>
-			<view v-else class="none t-xs t-mute">还没有记录</view>
-
-			<view class="add t-sm" @click="addRecord(g.key)">＋ 添加{{ g.label }}</view>
 		</view>
 
-		<view class="footer t-xs t-mute">
-			<text v-if="isToday">长按条目可删除 · 数据仅保存在本机</text>
+		<view class="foot t-xs t-mute">
+			<text v-if="isToday">数据仅保存在本机</text>
 			<text v-else>查看历史记录</text>
 		</view>
 	</view>
@@ -87,7 +106,14 @@ import { onShow } from '@dcloudio/uni-app'
 import { MACRO_META, MEALS } from '../../core/constants.js'
 import { addDays, dateLabel, formatTime, parseKey, todayKey } from '../../core/date.js'
 import { getSettings, recordsByDate } from '../../core/db.js'
-import { macroGoalsFromKcal, percent, recordTotals, round, sumRecords } from '../../core/nutrition.js'
+import {
+	groupDigits,
+	macroGoalsFromKcal,
+	percent,
+	recordTotals,
+	round,
+	sumRecords,
+} from '../../core/nutrition.js'
 import { persistPhoto, pickImage, toBase64 } from '../../core/photo.js'
 import { recognize } from '../../core/ai.js'
 import { setDraft } from '../../core/draft.js'
@@ -101,11 +127,9 @@ const isToday = computed(() => dateStr.value === todayKey())
 const headLabel = computed(() => dateLabel(dateStr.value))
 
 const subLabel = computed(() => {
-	if (isToday.value) {
-		const d = parseKey(dateStr.value)
-		return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
-	}
-	return '点击回到今天'
+	if (!isToday.value) return '点击回到今天'
+	const d = parseKey(dateStr.value)
+	return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}`
 })
 
 const totals = computed(() => sumRecords(records.value))
@@ -187,9 +211,10 @@ function addRecord(meal) {
 	})
 }
 
+/* ---------------- 拍照识别 ---------------- */
+
 function shoot() {
-	const s = getSettings()
-	if (!s.apiKey) {
+	if (!getSettings().apiKey) {
 		uni.showModal({
 			title: '还没配置 API Key',
 			content: '拍照识别需要阿里云百炼的 API Key。可以现在去设置里填写，也可以先手动记录。',
@@ -250,7 +275,7 @@ async function runRecognize(source) {
 		return
 	}
 
-	// 照片落盘失败不阻塞记录（缺口 B4：任何一步失败都要能退回手动）
+	// 照片落盘失败不阻塞记录（任何一步失败都要能退回手动）
 	let photo = ''
 	if (getSettings().storePhoto) {
 		try {
@@ -280,51 +305,50 @@ function fallbackToManual(title, content) {
 
 <style lang="scss" scoped>
 	.page {
-		padding: $gap;
-		padding-bottom: 60rpx;
+		padding: $s-3 $s-4 $s-6;
 	}
 
 	/* ---------- 日期切换 ---------- */
-	.datebar {
+	.head {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		padding: 0 8rpx 20rpx;
+		padding: $s-2 0 $s-4;
 	}
 
-	.navbtn {
-		width: 72rpx;
-		height: 72rpx;
-		border-radius: 36rpx;
-		background: #fff;
+	.nav {
+		width: 64rpx;
+		height: 64rpx;
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		border-radius: $r-pill;
 	}
 
-	.navbtn.dim {
-		opacity: 0.35;
+	.nav:active {
+		background: rgba(22, 32, 42, 0.05);
 	}
 
-	.chev {
-		font-size: 40rpx;
-		line-height: 1;
-		color: $c-text-sub;
-		margin-top: -6rpx;
+	.nav.off {
+		opacity: 0.25;
 	}
 
-	.dateinfo {
+	.flip {
+		transform: rotate(180deg);
+	}
+
+	.head-mid {
 		flex: 1;
 		text-align: center;
 	}
 
-	.dtoday {
+	.head-title {
 		display: block;
 		font-size: 34rpx;
 		font-weight: 600;
+		letter-spacing: 0.5rpx;
 	}
 
-	.dsub {
+	.head-sub {
 		display: block;
 		font-size: 22rpx;
 		color: $c-text-mute;
@@ -333,171 +357,218 @@ function fallbackToManual(title, content) {
 
 	/* ---------- 汇总卡 ---------- */
 	.summary {
-		padding: $gap-lg $gap;
+		padding: $s-5 $s-4 $s-4;
 	}
 
-	.kcal-row {
+	.hero {
 		display: flex;
 		align-items: baseline;
 		justify-content: center;
 	}
 
-	.kcal {
-		font-size: 76rpx;
+	.hero-num {
+		font-size: 92rpx;
 		font-weight: 700;
 		line-height: 1;
-		letter-spacing: -1rpx;
+		letter-spacing: -2rpx;
 	}
 
-	.kcal.over {
+	.hero-num.over {
 		color: $c-danger;
 	}
 
-	.kcal-goal {
+	.hero-goal {
 		font-size: 26rpx;
 		color: $c-text-mute;
-		margin-left: 10rpx;
+		margin-left: 12rpx;
 	}
 
 	.bar {
-		height: 18rpx;
-		border-radius: 9rpx;
-		background: #eef0f2;
+		height: 14rpx;
+		border-radius: $r-pill;
+		background: $c-fill;
 		overflow: hidden;
-		margin-top: $gap;
+		margin-top: $s-4;
 	}
 
 	.bar-fill {
 		height: 100%;
-		border-radius: 9rpx;
-		background: $c-primary;
-		transition: width 0.3s ease;
+		border-radius: $r-pill;
+		background: linear-gradient(90deg, #17b87b, $c-primary);
+		transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
 	}
 
 	.bar-fill.over {
-		background: $c-danger;
+		background: linear-gradient(90deg, #f97066, $c-danger);
 	}
 
-	.hint {
-		margin-top: 16rpx;
+	.hero-hint {
+		margin-top: $s-3;
 	}
 
 	.over-text {
 		color: $c-danger;
-		font-size: 26rpx;
 	}
 
-	.macros {
-		display: flex;
-		margin-top: $gap-lg;
+	.hr {
+		height: 1rpx;
+		background: $c-line;
+		margin: $s-4 0 $s-3;
 	}
 
+	/* ---------- 宏量营养素 ---------- */
 	.macro {
+		display: flex;
+		align-items: center;
+		padding: 9rpx 0;
+	}
+
+	.macro-label {
+		width: 104rpx;
+		font-size: 24rpx;
+		color: $c-text-sub;
+		flex-shrink: 0;
+	}
+
+	.macro-bar {
 		flex: 1;
-	}
-
-	.macro + .macro {
-		margin-left: $gap;
-	}
-
-	.macro-head {
-		margin-bottom: 8rpx;
-	}
-
-	.mini-bar {
-		height: 8rpx;
-		border-radius: 4rpx;
-		background: #eef0f2;
+		height: 10rpx;
+		border-radius: $r-pill;
+		background: $c-fill;
 		overflow: hidden;
+		margin-right: $s-3;
 	}
 
-	.mini-fill {
+	.macro-fill {
 		height: 100%;
-		border-radius: 4rpx;
+		border-radius: $r-pill;
+		transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
 	}
 
-	/* ---------- 操作 ---------- */
+	.macro-val {
+		width: 150rpx;
+		text-align: right;
+		font-size: 24rpx;
+		font-weight: 600;
+		flex-shrink: 0;
+	}
+
+	.macro-goal {
+		font-weight: 400;
+		color: $c-text-mute;
+	}
+
+	/* ---------- 操作按钮 ---------- */
 	.actions {
 		display: flex;
-		margin-top: $gap;
+		margin-top: $s-3;
 	}
 
 	.actions .btn + .btn {
-		margin-left: $gap;
+		margin-left: $s-3;
 	}
 
-	.cam {
-		margin-right: 8rpx;
+	.act-label {
+		margin-left: 12rpx;
 	}
 
-	/* ---------- 餐次分组 ---------- */
+	/* ---------- 餐次列表 ---------- */
+	.meals {
+		padding: 0 $s-4;
+	}
+
+	.meal {
+		padding: $s-3 0;
+		border-top: 1rpx solid $c-line;
+	}
+
+	.meal.first {
+		border-top: none;
+	}
+
 	.meal-head {
-		margin-bottom: 8rpx;
-	}
-
-	.meal-tag {
-		width: 40rpx;
-		height: 40rpx;
-		border-radius: 12rpx;
-		color: #fff;
-		font-size: 22rpx;
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		margin-right: 12rpx;
+	}
+
+	.meal-dot {
+		width: 14rpx;
+		height: 14rpx;
+		border-radius: $r-pill;
+		margin-right: 14rpx;
+		flex-shrink: 0;
 	}
 
 	.meal-name {
-		font-size: 30rpx;
+		font-size: 29rpx;
 		font-weight: 600;
 	}
 
-	.list {
-		margin-top: 8rpx;
-	}
-
-	.item {
-		display: flex;
-		align-items: center;
-		padding: 18rpx 0;
-		border-top: 1rpx solid $c-border;
-	}
-
-	.item-name {
-		display: block;
-		font-size: 28rpx;
-		margin-bottom: 2rpx;
-	}
-
-	.item-kcal {
-		font-size: 28rpx;
+	.meal-kcal {
+		font-size: 27rpx;
+		font-weight: 600;
 		color: $c-text-sub;
 	}
 
-	.arrow {
-		font-size: 32rpx;
-		color: #d1d5db;
-		margin-left: 10rpx;
+	.meal-unit {
+		font-size: 21rpx;
+		color: $c-text-mute;
+		margin-left: 5rpx;
 	}
 
-	.none {
-		padding: 16rpx 0;
+	.meal-add {
+		width: 52rpx;
+		height: 52rpx;
+		margin-left: $s-2;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: $r-pill;
+		background: $c-primary-tint;
 	}
 
-	.add {
-		color: $c-primary-dark;
-		padding: 18rpx 0 4rpx;
+	.meal-add:active {
+		background: $c-primary-weak;
+	}
+
+	/* ---------- 记录行 ---------- */
+	.rec {
+		display: flex;
+		align-items: center;
+		padding: 14rpx 0 14rpx 28rpx;
+		border-radius: $r-sm;
+	}
+
+	.rec-hover {
+		background: #fafbfc;
+	}
+
+	.rec-name {
+		display: block;
+		font-size: 28rpx;
+	}
+
+	.rec-meta {
+		display: block;
+		font-size: 21rpx;
+		color: $c-text-mute;
+		margin-top: 3rpx;
+	}
+
+	.rec-kcal {
+		font-size: 27rpx;
+		color: $c-text;
+		margin-left: $s-2;
+	}
+
+	.rec-arrow {
+		margin-left: 8rpx;
+		opacity: 0.65;
+	}
+
+	/* ---------- 页脚 ---------- */
+	.foot {
 		text-align: center;
-		border-top: 1rpx solid $c-border;
-		margin-top: 0;
-	}
-
-	.add:active {
-		opacity: 0.7;
-	}
-
-	.footer {
-		text-align: center;
-		padding: $gap-lg 0 0;
+		padding-top: $s-5;
 	}
 </style>
