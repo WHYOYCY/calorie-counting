@@ -1,0 +1,61 @@
+{
+	"pages": [
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationBarTitleText": "卡路里记录"
+			}
+		},
+		{
+			"path": "pages/stats/stats",
+			"style": {
+				"navigationBarTitleText": "统计"
+			}
+		},
+		{
+			"path": "pages/settings/settings",
+			"style": {
+				"navigationBarTitleText": "我的"
+			}
+		},
+		{
+			"path": "pages/record/edit",
+			"style": {
+				"navigationBarTitleText": "记录详情"
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "black",
+		"navigationBarTitleText": "卡路里记录",
+		"navigationBarBackgroundColor": "#ffffff",
+		"backgroundColor": "#f4f6f7"
+	},
+	"tabBar": {
+		"color": "#9ca3af",
+		"selectedColor": "#22c55e",
+		"backgroundColor": "#ffffff",
+		"borderStyle": "white",
+		"list": [
+			{
+				"pagePath": "pages/index/index",
+				"text": "记录",
+				"iconPath": "static/tabbar/record.png",
+				"selectedIconPath": "static/tabbar/record-on.png"
+			},
+			{
+				"pagePath": "pages/stats/stats",
+				"text": "统计",
+				"iconPath": "static/tabbar/stats.png",
+				"selectedIconPath": "static/tabbar/stats-on.png"
+			},
+			{
+				"pagePath": "pages/settings/settings",
+				"text": "我的",
+				"iconPath": "static/tabbar/mine.png",
+				"selectedIconPath": "static/tabbar/mine-on.png"
+			}
+		]
+	},
+	"uniIdRouter": {}
+}

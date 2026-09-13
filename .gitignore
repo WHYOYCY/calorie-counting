@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+unpackage/
+unpackage-res/
+
+# HBuilderX
+.hbuilderx/
+
+# 环境变量（含 API Key，禁止提交）
+.env
+.env.local
+.env.*.local
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+*.log
