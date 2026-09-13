@@ -428,7 +428,7 @@ function remove() {
 	uni.showModal({
 		title: '删除这条记录？',
 		content: '删除后无法恢复',
-		confirmColor: '#ef4444',
+		confirmColor: '#c97b6e',
 		success: (res) => {
 			if (!res.confirm) return
 			deleteRecord(id.value)

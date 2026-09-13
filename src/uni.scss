@@ -80,31 +80,34 @@ $uni-font-size-paragraph:15px;
    （uni-app 会把本文件自动注入所有 scss 样式块，无需手动 import）
    ============================================================ */
 
-/* ---------- 品牌主色：低饱和祖母绿，克制不刺眼 ---------- */
-$c-primary: #0fa36b;
-$c-primary-dark: #0b7f53;
-$c-primary-weak: #e8f6f0;
-$c-primary-tint: #f3faf7;
+/* ---------- 品牌主色：柔和薄荷灰绿，比纯绿不刺眼 ---------- */
+$c-primary: #52a98a;
+$c-primary-dark: #37795f;
+$c-primary-weak: #e7f2ee;
+$c-primary-tint: #f2f8f5;
 
-/* ---------- 语义色 ---------- */
-$c-danger: #f04438;
-$c-danger-weak: #fef2f1;
-$c-warn: #f79009;
+/* ---------- 语义色（同样降饱和） ---------- */
+$c-danger: #c97b6e;
+$c-danger-weak: #f9efed;
+$c-warn: #d9a45b;
 
-/* ---------- 数据可视化配色：同明度层，避免花 ---------- */
-$c-protein: #4c7df0;
-$c-fat: #f0a132;
-$c-carbs: #8b6ff0;
+/* ---------- 数据可视化配色：同明度、低饱和，避免花 ---------- */
+$c-protein: #6e90cc;
+$c-fat: #d9a45b;
+$c-carbs: #9c86cc;
 
-/* ---------- 中性色：带一点冷调，比纯灰更干净 ---------- */
-$c-text: #16202a;
-$c-text-sub: #5b6b7a;
-$c-text-mute: #9aa6b2;
-$c-line: #eef1f4;
-$c-line-strong: #e2e8ee;
-$c-fill: #f4f6f8;
-$c-bg: #f6f7f9;
+/* ---------- 中性色：带冷调，比纯灰更干净 ---------- */
+$c-text: #1c2733;
+$c-text-sub: #61707e;
+$c-text-mute: #9fabb6;
+$c-line: #eef1f3;
+$c-line-strong: #e3e8ec;
+$c-fill: #f3f5f7;
+$c-bg: #f7f8fa;
 $c-card: #ffffff;
+
+/* ---------- 数字字体：安卓系统自带 Roboto，大数字用细字重显得轻盈 ---------- */
+$ff-num: Roboto, 'DIN Alternate', 'Helvetica Neue', Helvetica, Arial, sans-serif;
 
 /* ---------- 圆角 ---------- */
 $r-xs: 8rpx;

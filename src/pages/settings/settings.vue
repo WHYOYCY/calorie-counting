@@ -24,7 +24,7 @@
 
 			<view class="row-btns test-row">
 				<view
-					class="btn btn-ghost grow"
+					class="btn btn-plain grow"
 					:class="{ disabled: testing }"
 					@click="doTest"
 				>
@@ -53,7 +53,7 @@
 
 			<view class="field">
 				<text class="label">保存照片</text>
-				<switch :checked="form.storePhoto" color="#22c55e" @change="onStorePhoto" />
+				<switch :checked="form.storePhoto" color="#52a98a" @change="onStorePhoto" />
 			</view>
 			<text class="hint t-xs t-mute">开启后会把识别用的照片存到 App 私有目录，占空间但可回看。</text>
 		</view>
@@ -77,7 +77,7 @@
 
 			<view class="field">
 				<text class="label">营养素自动分配</text>
-				<switch :checked="form.autoMacro" color="#22c55e" @change="onAutoMacro" />
+				<switch :checked="form.autoMacro" color="#52a98a" @change="onAutoMacro" />
 			</view>
 			<text class="hint t-xs t-mute">
 				按蛋白质 20% / 脂肪 25% / 碳水 55% 的供能比自动计算。
@@ -130,8 +130,8 @@
 			<text class="hint t-xs t-mute">共 {{ recordCount }} 条记录，全部保存在本机。</text>
 
 			<view class="row-btns">
-				<view class="btn btn-ghost grow" @click="doExport">导出备份</view>
-				<view class="btn btn-ghost grow" @click="openImport">导入备份</view>
+				<view class="btn btn-plain grow" @click="doExport">导出备份</view>
+				<view class="btn btn-plain grow" @click="openImport">导入备份</view>
 			</view>
 			<view class="btn btn-danger clear-btn" @click="doClear">清空全部记录</view>
 		</view>
@@ -195,7 +195,7 @@ const importText = ref('')
 const recordCount = ref(0)
 const form = reactive({ ...getSettings() })
 
-const modelLabels = computed(() => MODELS.map((m) => `${m.label}（${m.hint}）`))
+const modelLabels = computed(() => MODELS.map((m) => `${m.label} · ${m.hint}`))
 const modelIndex = computed(() => {
 	const i = MODELS.findIndex((m) => m.id === form.model)
 	return i >= 0 ? i : 0
@@ -356,7 +356,7 @@ function doClear() {
 		title: '清空全部记录？',
 		content: '所有记录与照片都会被删除，且无法恢复。建议先导出备份。',
 		confirmText: '清空',
-		confirmColor: '#ef4444',
+		confirmColor: '#c97b6e',
 		success: (res) => {
 			if (!res.confirm) return
 			clearAll()

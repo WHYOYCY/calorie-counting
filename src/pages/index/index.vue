@@ -14,63 +14,63 @@
 			</view>
 		</view>
 
-		<!-- 今日汇总 -->
+		<!-- 仪表盘 -->
 		<view class="card summary">
 			<view class="hero">
-				<text class="hero-num num" :class="{ over: isOver }">{{ groupDigits(totals.kcal) }}</text>
-				<text class="hero-goal num">/ {{ groupDigits(goal) }}</text>
+				<text class="hero-num" :class="{ over: isOver }">{{ totals.kcal }}</text>
+				<text class="hero-goal">/ {{ goal }}</text>
 			</view>
 
 			<view class="bar">
 				<view class="bar-fill" :class="{ over: isOver }" :style="{ width: pct + '%' }"></view>
 			</view>
 
-			<view class="between hero-hint">
-				<text v-if="!isOver" class="t-sm t-sub">
-					还可以吃 <text class="num t-bold">{{ groupDigits(remain) }}</text> kcal
-				</text>
-				<text v-else class="t-sm over-text">
-					已超出 <text class="num t-bold">{{ groupDigits(-remain) }}</text> kcal
-				</text>
-				<text class="t-xs t-mute num">{{ records.length }} 条记录</text>
+			<!-- 剩余热量：胶囊居中，弱化存在感 -->
+			<view class="pill-row">
+				<view class="pill" :class="{ over: isOver }">
+					<text v-if="!isOver">还可以吃 {{ remain }} kcal</text>
+					<text v-else>已超出 {{ -remain }} kcal</text>
+				</view>
 			</view>
 
 			<view class="hr"></view>
 
-			<view class="macro" v-for="m in macroRows" :key="m.key">
-				<text class="macro-label">{{ m.label }}</text>
-				<view class="macro-bar">
-					<view
-						class="macro-fill"
-						:style="{ width: m.pct + '%', background: m.color }"
-					></view>
+			<!-- 三大营养素：横向三列，省掉约一半垂直空间 -->
+			<view class="macros3">
+				<view class="m3" v-for="m in macroRows" :key="m.key">
+					<view class="m3-head">
+						<text class="m3-label">{{ m.label }}</text>
+						<text class="m3-val">{{ m.value }}<text class="m3-unit">g</text></text>
+					</view>
+					<view class="m3-foot">
+						<view class="m3-track">
+							<view class="m3-fill" :style="{ width: m.pct + '%', background: m.fill }"></view>
+						</view>
+						<image
+							v-if="m.over"
+							class="m3-alert"
+							src="/static/ui/alert.png"
+							mode="aspectFit"
+						/>
+					</view>
 				</view>
-				<text class="macro-val num">
-					{{ m.value }}<text class="macro-goal">/{{ m.goal }}</text>
-				</text>
 			</view>
 		</view>
 
-		<!-- 操作 -->
-		<view class="actions">
-			<view class="btn btn-primary grow" @click="shoot">
-				<image class="ico" src="/static/ui/camera.png" mode="aspectFit" />
-				<text class="act-label">拍照识别</text>
-			</view>
-			<view class="btn btn-ghost grow" @click="addRecord('')">
-				<image class="ico" src="/static/ui/plus.png" mode="aspectFit" />
-				<text class="act-label">手动添加</text>
-			</view>
+		<!-- 全天无记录 -->
+		<view v-if="!records.length" class="card empty-day">
+			<text class="empty-title">这一天还没有记录</text>
+			<text class="empty-sub">点右下角按钮，拍张照片就能估算热量</text>
 		</view>
 
-		<!-- 餐次分组 -->
-		<view class="card meals">
-			<view class="meal" v-for="(g, gi) in groups" :key="g.key" :class="{ first: gi === 0 }">
+		<!-- 餐次列表 -->
+		<view v-else class="list">
+			<view class="meal-block" v-for="g in filledGroups" :key="g.key">
 				<view class="meal-head">
-					<view class="meal-dot" :style="{ background: g.color }"></view>
+					<image class="meal-ico" :src="g.icon" mode="aspectFit" />
 					<text class="meal-name grow">{{ g.label }}</text>
-					<text v-if="g.totals.kcal" class="meal-kcal num">{{ groupDigits(g.totals.kcal) }}</text>
-					<text v-if="g.totals.kcal" class="meal-unit">kcal</text>
+					<text class="meal-kcal">{{ g.totals.kcal }}</text>
+					<text class="meal-unit">kcal</text>
 					<view class="meal-add" @click="addRecord(g.key)">
 						<image class="ico-sm" src="/static/ui/plus.png" mode="aspectFit" />
 					</view>
@@ -81,39 +81,58 @@
 					v-for="r in g.records"
 					:key="r.id"
 					@click="editRecord(r)"
-					hover-class="rec-hover"
+					hover-class="rec-press"
+					:hover-stay-time="80"
 				>
-					<view class="grow">
-						<text class="rec-name ellipsis">{{ itemNames(r) }}</text>
-						<text class="rec-meta num">{{ formatTime(r.ts) }} · {{ gramsOf(r) }} g</text>
+					<view class="rec-main">
+						<text class="rec-title ellipsis">{{ titleOf(r) }}</text>
+						<view class="rec-tags" v-if="tagsOf(r).length">
+							<text class="rec-tag" v-for="(t, ti) in tagsOf(r)" :key="ti">{{ t }}</text>
+						</view>
 					</view>
-					<text class="rec-kcal num">{{ kcalOf(r) }}</text>
-					<image class="ico-sm rec-arrow" src="/static/ui/chevron.png" mode="aspectFit" />
+					<view class="rec-side">
+						<text class="rec-kcal">{{ kcalOf(r) }}</text>
+						<text class="rec-meta">{{ formatTime(r.ts) }} · {{ gramsOf(r) }}g</text>
+					</view>
 				</view>
 			</view>
 		</view>
+	</view>
 
-		<view class="foot t-xs t-mute">
-			<text v-if="isToday">数据仅保存在本机</text>
-			<text v-else>查看历史记录</text>
+	<!-- 悬浮操作：不再用两个大色块把数据和列表隔开 -->
+	<view v-if="fabOpen" class="fab-mask" @click="fabOpen = false"></view>
+	<view class="fab-wrap">
+		<view class="fab-menu" :class="{ open: fabOpen }">
+			<view class="fab-item" @click="pickManual">
+				<text class="fab-item-t">手动添加</text>
+				<view class="fab-item-b">
+					<image class="ico-sm" src="/static/ui/plus.png" mode="aspectFit" />
+				</view>
+			</view>
+			<view class="fab-item" @click="pickCamera">
+				<text class="fab-item-t">拍照识别</text>
+				<view class="fab-item-b">
+					<image class="ico-sm" src="/static/ui/camera-gray.png" mode="aspectFit" />
+				</view>
+			</view>
+		</view>
+		<view class="fab" :class="{ open: fabOpen }" @click="fabOpen = !fabOpen">
+			<image
+				class="ico"
+				:src="fabOpen ? '/static/ui/close-white.png' : '/static/ui/camera.png'"
+				mode="aspectFit"
+			/>
 		</view>
 	</view>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
-import { onShow } from '@dcloudio/uni-app'
+import { onShow, onHide } from '@dcloudio/uni-app'
 import { MACRO_META, MEALS } from '../../core/constants.js'
 import { addDays, dateLabel, formatTime, parseKey, todayKey } from '../../core/date.js'
 import { getSettings, recordsByDate } from '../../core/db.js'
-import {
-	groupDigits,
-	macroGoalsFromKcal,
-	percent,
-	recordTotals,
-	round,
-	sumRecords,
-} from '../../core/nutrition.js'
+import { macroGoalsFromKcal, percent, recordTotals, round, sumRecords } from '../../core/nutrition.js'
 import { persistPhoto, pickImage, toBase64 } from '../../core/photo.js'
 import { recognize } from '../../core/ai.js'
 import { setDraft } from '../../core/draft.js'
@@ -121,6 +140,7 @@ import { setDraft } from '../../core/draft.js'
 const dateStr = ref(todayKey())
 const records = ref([])
 const settings = ref(getSettings())
+const fabOpen = ref(false)
 
 const isToday = computed(() => dateStr.value === todayKey())
 
@@ -146,7 +166,17 @@ const macroRows = computed(() => {
 	return MACRO_META.map((m) => {
 		const value = t[m.key] || 0
 		const mg = Number(g[m.key]) || 0
-		return { ...m, value, goal: mg, pct: percent(value, mg, 100) }
+		const over = mg > 0 && value > mg
+		return {
+			...m,
+			value,
+			goal: mg,
+			over,
+			pct: percent(value, mg, 100),
+			fill: over
+				? `linear-gradient(90deg, ${m.color}, #c97b6e)`
+				: `linear-gradient(90deg, ${m.color}b0, ${m.color})`,
+		}
 	})
 })
 
@@ -163,12 +193,22 @@ const groups = computed(() => {
 	})
 })
 
+/** 只渲染有记录的餐次，减少空壳占位、增强流动感 */
+const filledGroups = computed(() => groups.value.filter((g) => g.records.length))
+
 function refresh() {
 	settings.value = getSettings()
 	records.value = recordsByDate(dateStr.value)
 }
 
-onShow(refresh)
+onShow(() => {
+	fabOpen.value = false
+	refresh()
+})
+
+onHide(() => {
+	fabOpen.value = false
+})
 
 function shift(n) {
 	if (n > 0 && isToday.value) {
@@ -185,9 +225,20 @@ function backToToday() {
 	refresh()
 }
 
-function itemNames(r) {
-	const names = (r.items || []).map((i) => i.name).filter(Boolean)
-	return names.length ? names.join('、') : '空记录'
+/* ---------------- 列表展示：主标题 + 配菜标签 + 右侧数据列 ---------------- */
+
+function titleOf(r) {
+	const items = r.items || []
+	return items.length ? items[0].name : '空记录'
+}
+
+function tagsOf(r) {
+	const rest = (r.items || [])
+		.slice(1)
+		.map((i) => i.name)
+		.filter(Boolean)
+	if (rest.length <= 3) return rest
+	return rest.slice(0, 2).concat(`+${rest.length - 2}`)
 }
 
 function gramsOf(r) {
@@ -211,7 +262,18 @@ function addRecord(meal) {
 	})
 }
 
-/* ---------------- 拍照识别 ---------------- */
+/* ---------------- 悬浮操作 ---------------- */
+
+function pickManual() {
+	fabOpen.value = false
+	addRecord('')
+}
+
+function pickCamera() {
+	fabOpen.value = false
+	// 等收起动画走完再拉起系统相机，避免动画被系统弹窗打断
+	setTimeout(shoot, 180)
+}
 
 function shoot() {
 	if (!getSettings().apiKey) {
@@ -275,7 +337,6 @@ async function runRecognize(source) {
 		return
 	}
 
-	// 照片落盘失败不阻塞记录（任何一步失败都要能退回手动）
 	let photo = ''
 	if (getSettings().storePhoto) {
 		try {
@@ -305,7 +366,7 @@ function fallbackToManual(title, content) {
 
 <style lang="scss" scoped>
 	.page {
-		padding: $s-3 $s-4 $s-6;
+		padding: $s-3 $s-4 200rpx;
 	}
 
 	/* ---------- 日期切换 ---------- */
@@ -325,7 +386,7 @@ function fallbackToManual(title, content) {
 	}
 
 	.nav:active {
-		background: rgba(22, 32, 42, 0.05);
+		background: rgba(28, 39, 51, 0.05);
 	}
 
 	.nav.off {
@@ -343,19 +404,18 @@ function fallbackToManual(title, content) {
 
 	.head-title {
 		display: block;
-		font-size: 34rpx;
+		font-size: 33rpx;
 		font-weight: 600;
-		letter-spacing: 0.5rpx;
 	}
 
 	.head-sub {
 		display: block;
-		font-size: 22rpx;
+		font-size: 21rpx;
 		color: $c-text-mute;
 		margin-top: 2rpx;
 	}
 
-	/* ---------- 汇总卡 ---------- */
+	/* ---------- 仪表盘 ---------- */
 	.summary {
 		padding: $s-5 $s-4 $s-4;
 	}
@@ -366,11 +426,13 @@ function fallbackToManual(title, content) {
 		justify-content: center;
 	}
 
+	/* 细字重 + 等宽数字，去掉千分位逗号，显得轻盈 */
 	.hero-num {
-		font-size: 92rpx;
-		font-weight: 700;
+		font-family: $ff-num;
+		font-size: 100rpx;
+		font-weight: 300;
 		line-height: 1;
-		letter-spacing: -2rpx;
+		letter-spacing: -1rpx;
 	}
 
 	.hero-num.over {
@@ -378,13 +440,14 @@ function fallbackToManual(title, content) {
 	}
 
 	.hero-goal {
-		font-size: 26rpx;
+		font-family: $ff-num;
+		font-size: 25rpx;
 		color: $c-text-mute;
 		margin-left: 12rpx;
 	}
 
 	.bar {
-		height: 14rpx;
+		height: 12rpx;
 		border-radius: $r-pill;
 		background: $c-fill;
 		overflow: hidden;
@@ -394,19 +457,30 @@ function fallbackToManual(title, content) {
 	.bar-fill {
 		height: 100%;
 		border-radius: $r-pill;
-		background: linear-gradient(90deg, #17b87b, $c-primary);
-		transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+		background: linear-gradient(90deg, #7cc3a8, $c-primary);
+		transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 	}
 
 	.bar-fill.over {
-		background: linear-gradient(90deg, #f97066, $c-danger);
+		background: linear-gradient(90deg, #e0a99e, $c-danger);
 	}
 
-	.hero-hint {
+	.pill-row {
+		display: flex;
+		justify-content: center;
 		margin-top: $s-3;
 	}
 
-	.over-text {
+	.pill {
+		background: $c-primary-weak;
+		color: $c-primary-dark;
+		font-size: 22rpx;
+		padding: 8rpx 26rpx;
+		border-radius: $r-pill;
+	}
+
+	.pill.over {
+		background: $c-danger-weak;
 		color: $c-danger;
 	}
 
@@ -416,159 +490,304 @@ function fallbackToManual(title, content) {
 		margin: $s-4 0 $s-3;
 	}
 
-	/* ---------- 宏量营养素 ---------- */
-	.macro {
+	/* ---------- 三列营养素 ---------- */
+	.macros3 {
+		display: flex;
+	}
+
+	.m3 {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.m3 + .m3 {
+		margin-left: $s-4;
+	}
+
+	.m3-head {
+		display: flex;
+		align-items: baseline;
+		margin-bottom: 10rpx;
+	}
+
+	.m3-label {
+		font-size: 20rpx;
+		color: $c-text-mute;
+		margin-right: 7rpx;
+	}
+
+	.m3-val {
+		font-family: $ff-num;
+		font-size: 28rpx;
+		font-weight: 600;
+	}
+
+	.m3-unit {
+		font-size: 19rpx;
+		font-weight: 400;
+		color: $c-text-mute;
+		margin-left: 1rpx;
+	}
+
+	.m3-foot {
 		display: flex;
 		align-items: center;
-		padding: 9rpx 0;
 	}
 
-	.macro-label {
-		width: 104rpx;
-		font-size: 24rpx;
-		color: $c-text-sub;
-		flex-shrink: 0;
-	}
-
-	.macro-bar {
+	.m3-track {
 		flex: 1;
-		height: 10rpx;
+		height: 8rpx;
 		border-radius: $r-pill;
 		background: $c-fill;
 		overflow: hidden;
-		margin-right: $s-3;
 	}
 
-	.macro-fill {
+	.m3-fill {
 		height: 100%;
 		border-radius: $r-pill;
-		transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+		transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 	}
 
-	.macro-val {
-		width: 150rpx;
-		text-align: right;
-		font-size: 24rpx;
-		font-weight: 600;
+	.m3-alert {
+		width: 22rpx;
+		height: 22rpx;
+		margin-left: 7rpx;
 		flex-shrink: 0;
 	}
 
-	.macro-goal {
-		font-weight: 400;
-		color: $c-text-mute;
-	}
-
-	/* ---------- 操作按钮 ---------- */
-	.actions {
-		display: flex;
+	/* ---------- 空状态 ---------- */
+	.empty-day {
 		margin-top: $s-3;
+		padding: $s-6 $s-4;
+		text-align: center;
 	}
 
-	.actions .btn + .btn {
-		margin-left: $s-3;
+	.empty-title {
+		display: block;
+		font-size: 28rpx;
+		color: $c-text-sub;
 	}
 
-	.act-label {
-		margin-left: 12rpx;
+	.empty-sub {
+		display: block;
+		font-size: 22rpx;
+		color: $c-text-mute;
+		margin-top: 8rpx;
 	}
 
-	/* ---------- 餐次列表 ---------- */
-	.meals {
-		padding: 0 $s-4;
+	/* ---------- 餐次 ---------- */
+	.list {
+		margin-top: $s-5;
 	}
 
-	.meal {
-		padding: $s-3 0;
-		border-top: 1rpx solid $c-line;
-	}
-
-	.meal.first {
-		border-top: none;
+	.meal-block + .meal-block {
+		margin-top: $s-5;
 	}
 
 	.meal-head {
 		display: flex;
 		align-items: center;
+		padding: 0 4rpx $s-2;
 	}
 
-	.meal-dot {
-		width: 14rpx;
-		height: 14rpx;
-		border-radius: $r-pill;
-		margin-right: 14rpx;
+	.meal-ico {
+		width: 38rpx;
+		height: 38rpx;
+		margin-right: 10rpx;
 		flex-shrink: 0;
 	}
 
 	.meal-name {
-		font-size: 29rpx;
+		font-size: 27rpx;
 		font-weight: 600;
 	}
 
 	.meal-kcal {
-		font-size: 27rpx;
+		font-family: $ff-num;
+		font-size: 26rpx;
 		font-weight: 600;
 		color: $c-text-sub;
 	}
 
 	.meal-unit {
-		font-size: 21rpx;
+		font-size: 19rpx;
 		color: $c-text-mute;
-		margin-left: 5rpx;
+		margin-left: 4rpx;
 	}
 
 	.meal-add {
-		width: 52rpx;
-		height: 52rpx;
+		width: 48rpx;
+		height: 48rpx;
 		margin-left: $s-2;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		border-radius: $r-pill;
-		background: $c-primary-tint;
+		background: $c-card;
+		box-shadow: $sh-1;
 	}
 
 	.meal-add:active {
-		background: $c-primary-weak;
+		background: $c-primary-tint;
 	}
 
-	/* ---------- 记录行 ---------- */
+	/* ---------- 记录卡片 ---------- */
 	.rec {
 		display: flex;
 		align-items: center;
-		padding: 14rpx 0 14rpx 28rpx;
-		border-radius: $r-sm;
+		background: $c-card;
+		border-radius: $r-md;
+		padding: $s-3 $s-3 $s-3 $s-4;
+		box-shadow: $sh-1;
 	}
 
-	.rec-hover {
-		background: #fafbfc;
+	.rec + .rec {
+		margin-top: $s-2;
 	}
 
-	.rec-name {
+	.rec-press {
+		background: #fbfcfd;
+	}
+
+	.rec-main {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.rec-title {
 		display: block;
-		font-size: 28rpx;
+		font-size: 29rpx;
+		font-weight: 600;
+		line-height: 1.35;
+	}
+
+	.rec-tags {
+		display: flex;
+		flex-wrap: wrap;
+		margin-top: 9rpx;
+	}
+
+	.rec-tag {
+		font-size: 20rpx;
+		color: $c-text-sub;
+		background: $c-fill;
+		border-radius: $r-pill;
+		padding: 3rpx 13rpx;
+		margin: 0 8rpx 4rpx 0;
+	}
+
+	/* 右侧数据列：热量是焦点，时间与重量退到次级 */
+	.rec-side {
+		text-align: right;
+		margin-left: $s-3;
+		flex-shrink: 0;
+	}
+
+	.rec-kcal {
+		display: block;
+		font-family: $ff-num;
+		font-size: 36rpx;
+		font-weight: 700;
+		line-height: 1.1;
+		letter-spacing: -0.5rpx;
 	}
 
 	.rec-meta {
 		display: block;
-		font-size: 21rpx;
+		font-family: $ff-num;
+		font-size: 19rpx;
 		color: $c-text-mute;
-		margin-top: 3rpx;
+		margin-top: 5rpx;
 	}
 
-	.rec-kcal {
-		font-size: 27rpx;
+	/* ---------- 悬浮操作 ---------- */
+	.fab-mask {
+		position: fixed;
+		left: 0;
+		right: 0;
+		top: 0;
+		bottom: 0;
+		background: rgba(28, 39, 51, 0.22);
+		z-index: 40;
+	}
+
+	.fab-wrap {
+		position: fixed;
+		right: $s-4;
+		bottom: calc(50px + #{$s-4});
+		z-index: 50;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+	}
+
+	.fab-menu {
+		opacity: 0;
+		transform: translateY(20rpx) scale(0.92);
+		transform-origin: bottom right;
+		pointer-events: none;
+		transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+		margin-bottom: $s-3;
+	}
+
+	.fab-menu.open {
+		opacity: 1;
+		transform: none;
+		pointer-events: auto;
+	}
+
+	.fab-item {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		margin-top: $s-2;
+	}
+
+	.fab-item-t {
+		background: #fff;
 		color: $c-text;
-		margin-left: $s-2;
+		font-size: 25rpx;
+		font-weight: 500;
+		padding: 12rpx 24rpx;
+		border-radius: $r-pill;
+		box-shadow: $sh-2;
+		margin-right: $s-2;
 	}
 
-	.rec-arrow {
-		margin-left: 8rpx;
-		opacity: 0.65;
+	.fab-item-b {
+		width: 84rpx;
+		height: 84rpx;
+		border-radius: $r-pill;
+		background: #fff;
+		box-shadow: $sh-2;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 
-	/* ---------- 页脚 ---------- */
-	.foot {
-		text-align: center;
-		padding-top: $s-5;
+	.fab-item:active .fab-item-b {
+		background: $c-primary-tint;
+	}
+
+	.fab {
+		width: 108rpx;
+		height: 108rpx;
+		border-radius: $r-pill;
+		background: linear-gradient(135deg, #63b795, $c-primary);
+		box-shadow: 0 10rpx 26rpx rgba(82, 169, 138, 0.34);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1), background 0.2s;
+	}
+
+	.fab.open {
+		transform: rotate(90deg);
+		background: linear-gradient(135deg, #7b8896, #5d6b78);
+		box-shadow: 0 10rpx 26rpx rgba(93, 107, 120, 0.28);
+	}
+
+	.fab:active {
+		opacity: 0.9;
 	}
 </style>

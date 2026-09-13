@@ -31,7 +31,7 @@
 		<view class="card">
 			<text class="kicker">总摄入</text>
 			<view class="hero">
-				<text class="hero-num num">{{ groupDigits(summary.totals.kcal) }}</text>
+				<text class="hero-num num">{{ summary.totals.kcal }}</text>
 				<text class="hero-unit">kcal</text>
 			</view>
 
@@ -107,7 +107,7 @@
 			<text class="kicker">餐次分布</text>
 			<view class="meal" v-for="m in meals" :key="m.key">
 				<view class="meal-row">
-					<view class="meal-dot" :style="{ background: m.color }"></view>
+					<image class="meal-ico" :src="m.icon" mode="aspectFit" />
 					<text class="meal-name grow">{{ m.label }}</text>
 					<text class="meal-kcal num">{{ groupDigits(m.totals.kcal) }}</text>
 					<text class="meal-unit">kcal</text>
@@ -215,9 +215,10 @@ const scaleMax = computed(() => {
 	return max > 0 ? max : 1
 })
 
+/** 目标线夹到 96%，否则目标 >= 刻度上限时会贴在图顶被裁掉 */
 const goalPct = computed(() => {
 	if (goal.value <= 0) return 0
-	return Math.min(100, (goal.value / scaleMax.value) * 100)
+	return Math.min(96, (goal.value / scaleMax.value) * 100)
 })
 
 const bars = computed(() => {
@@ -226,10 +227,12 @@ const bars = computed(() => {
 	return summary.value.series.map((s) => {
 		const day = Number(s.date.slice(8))
 		const wd = WEEK_SHORT[parseKey(s.date).getDay()]
+		const kcal = s.totals.kcal
 		return {
 			date: s.date,
-			value: s.totals.kcal,
-			h: Math.round((s.totals.kcal / max) * 100),
+			value: kcal,
+			// 值为 0 就不画柱（否则只剩一截误导性的短柱）
+			h: kcal > 0 ? Math.max(2, Math.round((kcal / max) * 100)) : 0,
 			// 月视图只标 1/5/10… 避免 30 个标签挤在一起
 			label: isMonth ? (day === 1 || day % 5 === 0 ? String(day) : '') : wd,
 		}
@@ -364,11 +367,13 @@ function tapBar(b) {
 		margin-top: 6rpx;
 	}
 
+	/* 展示级大数字：细字重、无千分位，显得轻盈 */
 	.hero-num {
-		font-size: 72rpx;
-		font-weight: 700;
-		line-height: 1.1;
-		letter-spacing: -1.5rpx;
+		font-family: $ff-num;
+		font-size: 82rpx;
+		font-weight: 300;
+		line-height: 1.05;
+		letter-spacing: -1rpx;
 		color: $c-primary-dark;
 	}
 
@@ -472,7 +477,15 @@ function tapBar(b) {
 	.legend-line {
 		width: 28rpx;
 		height: 2rpx;
-		background: $c-text-mute;
+		background-image: linear-gradient(
+			to right,
+			$c-text-mute 0,
+			$c-text-mute 10rpx,
+			transparent 10rpx,
+			transparent 20rpx
+		);
+		background-size: 20rpx 2rpx;
+		background-repeat: repeat-x;
 		margin-right: 8rpx;
 	}
 
@@ -490,15 +503,18 @@ function tapBar(b) {
 		position: absolute;
 		left: 0;
 		right: 0;
-		height: 1rpx;
-		background: repeating-linear-gradient(
+		height: 2rpx;
+		/* 用 background-image 而不是 repeating-linear-gradient，兼容性更稳 */
+		background-image: linear-gradient(
 			to right,
 			$c-text-mute 0,
-			$c-text-mute 8rpx,
-			transparent 8rpx,
-			transparent 16rpx
+			$c-text-mute 10rpx,
+			transparent 10rpx,
+			transparent 20rpx
 		);
-		opacity: 0.7;
+		background-size: 20rpx 2rpx;
+		background-repeat: repeat-x;
+		opacity: 0.85;
 	}
 
 	.bars {
@@ -531,13 +547,12 @@ function tapBar(b) {
 	.bar {
 		width: 56%;
 		max-width: 34rpx;
-		min-height: 4rpx;
-		background: linear-gradient(180deg, #17b87b, $c-primary);
+		background: linear-gradient(180deg, #7cc3a8, $c-primary);
 		border-radius: 6rpx 6rpx 0 0;
 	}
 
 	.bar.over {
-		background: linear-gradient(180deg, #f97066, $c-danger);
+		background: linear-gradient(180deg, #e0a99e, $c-danger);
 	}
 
 	.xaxis {
@@ -566,11 +581,10 @@ function tapBar(b) {
 		align-items: center;
 	}
 
-	.meal-dot {
-		width: 14rpx;
-		height: 14rpx;
-		border-radius: $r-pill;
-		margin-right: 14rpx;
+	.meal-ico {
+		width: 32rpx;
+		height: 32rpx;
+		margin-right: 12rpx;
 		flex-shrink: 0;
 	}
 

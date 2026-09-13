@@ -29,11 +29,11 @@
 		"navigationBarTextStyle": "black",
 		"navigationBarTitleText": "卡路里记录",
 		"navigationBarBackgroundColor": "#ffffff",
-		"backgroundColor": "#f4f6f7"
+		"backgroundColor": "#f7f8fa"
 	},
 	"tabBar": {
-		"color": "#9ca3af",
-		"selectedColor": "#22c55e",
+		"color": "#a8b3bd",
+		"selectedColor": "#52a98a",
 		"backgroundColor": "#ffffff",
 		"borderStyle": "white",
 		"list": [

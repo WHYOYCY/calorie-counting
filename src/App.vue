@@ -98,8 +98,9 @@
 		font-weight: 600;
 	}
 
-	/* 数字统一用等宽数字，避免跳动 */
+	/* 数字统一用等宽数字 + 系统 Roboto，避免跳动且更现代 */
 	.num {
+		font-family: $ff-num;
 		font-variant-numeric: tabular-nums;
 		font-feature-settings: 'tnum';
 	}
@@ -134,7 +135,7 @@
 	.btn-primary {
 		background: $c-primary;
 		color: #fff;
-		box-shadow: 0 6rpx 18rpx rgba(15, 163, 107, 0.22);
+		box-shadow: 0 6rpx 18rpx rgba(82, 169, 138, 0.26);
 	}
 
 	.btn-ghost {

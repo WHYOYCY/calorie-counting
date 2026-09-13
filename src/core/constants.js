@@ -7,10 +7,16 @@ export const SCHEMA_VERSION = 1
 
 /** 餐次定义（顺序即展示顺序） */
 export const MEALS = [
-	{ key: 'breakfast', label: '早餐', short: '早', color: '#f0a132' },
-	{ key: 'lunch', label: '午餐', short: '午', color: '#0fa36b' },
-	{ key: 'dinner', label: '晚餐', short: '晚', color: '#4c7df0' },
-	{ key: 'snack', label: '加餐', short: '加', color: '#8b6ff0' },
+	{
+		key: 'breakfast',
+		label: '早餐',
+		short: '早',
+		color: '#d9a45b',
+		icon: '/static/meal/breakfast.png',
+	},
+	{ key: 'lunch', label: '午餐', short: '午', color: '#52a98a', icon: '/static/meal/lunch.png' },
+	{ key: 'dinner', label: '晚餐', short: '晚', color: '#6e90cc', icon: '/static/meal/dinner.png' },
+	{ key: 'snack', label: '加餐', short: '加', color: '#9c86cc', icon: '/static/meal/snack.png' },
 ]
 
 export const MEAL_KEYS = MEALS.map((m) => m.key)
@@ -32,9 +38,9 @@ export const MACRO_RATIO = { protein: 0.2, fat: 0.25, carbs: 0.55 }
 export const KCAL_PER_GRAM = { protein: 4, fat: 9, carbs: 4 }
 
 export const MACRO_META = [
-	{ key: 'protein', label: '蛋白质', unit: 'g', color: '#4c7df0' },
-	{ key: 'fat', label: '脂肪', unit: 'g', color: '#f0a132' },
-	{ key: 'carbs', label: '碳水', unit: 'g', color: '#8b6ff0' },
+	{ key: 'protein', label: '蛋白质', unit: 'g', color: '#6e90cc' },
+	{ key: 'fat', label: '脂肪', unit: 'g', color: '#d9a45b' },
+	{ key: 'carbs', label: '碳水', unit: 'g', color: '#9c86cc' },
 ]
 
 /** 可选视觉模型 */
