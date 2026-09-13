@@ -7,10 +7,10 @@ export const SCHEMA_VERSION = 1
 
 /** 餐次定义（顺序即展示顺序） */
 export const MEALS = [
-	{ key: 'breakfast', label: '早餐', short: '早' },
-	{ key: 'lunch', label: '午餐', short: '午' },
-	{ key: 'dinner', label: '晚餐', short: '晚' },
-	{ key: 'snack', label: '加餐', short: '加' },
+	{ key: 'breakfast', label: '早餐', short: '早', color: '#f59e0b' },
+	{ key: 'lunch', label: '午餐', short: '午', color: '#22c55e' },
+	{ key: 'dinner', label: '晚餐', short: '晚', color: '#3b82f6' },
+	{ key: 'snack', label: '加餐', short: '加', color: '#8b5cf6' },
 ]
 
 export const MEAL_KEYS = MEALS.map((m) => m.key)

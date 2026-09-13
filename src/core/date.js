@@ -35,6 +35,21 @@ export function addDays(key, n) {
 	return dateKey(d.getTime())
 }
 
+/** 时间戳 → { date: 'YYYY-MM-DD', time: 'HH:mm' } */
+export function splitDateTime(ts) {
+	return { date: dateKey(ts), time: formatTime(ts) }
+}
+
+/** 'YYYY-MM-DD' + 'HH:mm' → 时间戳（本地时区，避免用字符串拼接导致时区偏移） */
+export function combineDateTime(key, timeStr) {
+	const d = parseKey(key)
+	const parts = String(timeStr || '00:00').split(':')
+	const h = Number(parts[0])
+	const mi = Number(parts[1])
+	d.setHours(isFinite(h) ? h : 0, isFinite(mi) ? mi : 0, 0, 0)
+	return d.getTime()
+}
+
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
 
 /** 日期标签：今天 / 昨天 / 明天 / M月D日 周X / YYYY年M月D日 */

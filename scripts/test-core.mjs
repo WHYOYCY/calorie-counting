@@ -12,6 +12,8 @@ import {
 	formatTime,
 	addDays,
 	dateLabel,
+	splitDateTime,
+	combineDateTime,
 	startOfWeek,
 	startOfMonth,
 	endOfMonth,
@@ -117,6 +119,19 @@ eq(parseKey('2026-09-13').getDate(), 13, 'parseKey 解析到本地日期')
 eq(addDays('2026-09-30', 1), '2026-10-01', 'addDays 跨月')
 eq(addDays('2026-01-01', -1), '2025-12-31', 'addDays 跨年进位')
 eq(dayOffset('2026-09-12', T(2026, 9, 13)), -1, 'dayOffset 昨天 = -1')
+
+eq(
+	splitDateTime(T(2026, 9, 13, 8, 30)),
+	{ date: '2026-09-13', time: '08:30' },
+	'splitDateTime 拆分日期与时间'
+)
+eq(combineDateTime('2026-09-13', '08:30'), T(2026, 9, 13, 8, 30), 'combineDateTime 与拆分往返一致')
+eq(
+	dateKey(combineDateTime('2026-09-13', '23:59')),
+	'2026-09-13',
+	'combineDateTime 处理 23:59 边界（不会跨天）'
+)
+eq(combineDateTime('2026-09-13', '00:00'), parseKey('2026-09-13').getTime(), 'combineDateTime 00:00 = 当日零点')
 
 group('date.js · 日期标签')
 eq(dateLabel('2026-09-13', T(2026, 9, 13)), '今天', '今天')

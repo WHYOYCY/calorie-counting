@@ -73,7 +73,7 @@ export function rangeSummary(records, fromKey, toKey, goal = 0) {
 export function mealBreakdown(records) {
 	return MEALS.map((m) => {
 		const list = (records || []).filter((r) => r.meal === m.key)
-		return { key: m.key, label: m.label, short: m.short, count: list.length, totals: sumRecords(list) }
+		return { ...m, count: list.length, totals: sumRecords(list) }
 	})
 }
 
