@@ -15,6 +15,7 @@
 import { SCHEMA_VERSION, DEFAULT_SETTINGS } from './constants.js'
 import { dateKey, mealOfTs } from './date.js'
 import { round } from './nutrition.js'
+import { deletePhotoFile } from './photo.js'
 
 const K_META = 'cc_meta'
 const K_RECORDS = 'cc_records'
@@ -54,10 +55,7 @@ function writeRaw(key, value) {
 
 /** 删除照片文件（缺口 A4：删除记录时连带清理，否则沙箱被垃圾图撑爆） */
 function removePhotoFile(path) {
-	if (!path) return
-	if (typeof uni !== 'undefined' && uni && typeof uni.removeSavedFile === 'function') {
-		uni.removeSavedFile({ filePath: path, fail: () => {} })
-	}
+	deletePhotoFile(path)
 }
 
 /* ---------------- id ---------------- */

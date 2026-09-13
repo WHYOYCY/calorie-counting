@@ -22,6 +22,16 @@
 				Key 只保存在本机，不会上传到任何第三方服务器。开通地址：阿里云百炼控制台。
 			</text>
 
+			<view class="row-btns test-row">
+				<view
+					class="btn btn-ghost grow"
+					:class="{ disabled: testing }"
+					@click="doTest"
+				>
+					{{ testing ? '测试中…' : '测试连接' }}
+				</view>
+			</view>
+
 			<view class="field">
 				<text class="label">模型</text>
 				<picker :range="modelLabels" :value="modelIndex" @change="onModel">
@@ -176,8 +186,10 @@ import { DEFAULT_BASE_URL, MODELS } from '../../core/constants.js'
 import { getSettings, saveSettings, allRecords, exportAll, importAll, clearAll } from '../../core/db.js'
 import { macroGoalsFromKcal } from '../../core/nutrition.js'
 import { backupFileName, copyText, writeBackupFile } from '../../core/backup.js'
+import { testConnection } from '../../core/ai.js'
 
 const showKey = ref(false)
+const testing = ref(false)
 const importing = ref(false)
 const importText = ref('')
 const recordCount = ref(0)
@@ -206,9 +218,43 @@ function refresh() {
 
 onShow(refresh)
 
-function commit(patch, msg = '已保存') {
+function commit(patch, msg) {
 	Object.assign(form, saveSettings(patch))
-	uni.showToast({ title: msg, icon: 'none' })
+	if (msg) uni.showToast({ title: msg, icon: 'none' })
+}
+
+/* ---------------- 测连通（缺口 C2） ---------------- */
+
+async function doTest() {
+	const key = String(form.apiKey || '').trim()
+	if (!key) {
+		uni.showToast({ title: '请先填写 API Key', icon: 'none' })
+		return
+	}
+	// 先把当前填的内容落库，保证测的就是稍后要用的配置
+	commit({ apiKey: key }, '')
+	testing.value = true
+	let res
+	try {
+		res = await testConnection(getSettings())
+	} catch (e) {
+		res = { ok: false, error: '测试过程出错' }
+	}
+	testing.value = false
+
+	if (res.ok) {
+		uni.showModal({
+			title: '连接正常',
+			content: `模型 ${res.model} 已就绪，可以回去拍照识别了。`,
+			showCancel: false,
+		})
+	} else {
+		uni.showModal({
+			title: '连接失败',
+			content: (res.error || '未知错误') + (res.detail ? `\n${res.detail}` : ''),
+			showCancel: false,
+		})
+	}
 }
 
 const onApiKey = (e) => {
@@ -397,6 +443,11 @@ function doClear() {
 	.row-btns {
 		display: flex;
 		margin-top: $gap-sm;
+	}
+
+	.test-row {
+		margin-top: 0;
+		padding-bottom: 10rpx;
 	}
 
 	.row-btns .btn + .btn {

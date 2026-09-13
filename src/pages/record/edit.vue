@@ -1,5 +1,11 @@
 <template>
 	<view class="page">
+		<!-- 识别照片 -->
+		<view class="card photo-card" v-if="photo">
+			<image class="photo" :src="photo" mode="aspectFill" @click="previewPhoto" />
+			<text class="photo-tag" v-if="source === 'ai'">AI 识别</text>
+		</view>
+
 		<!-- 时间与餐次 -->
 		<view class="card">
 			<view class="field">
@@ -186,6 +192,7 @@ import {
 } from '../../core/db.js'
 import { itemTotals, sumItems } from '../../core/nutrition.js'
 import { recentFoods } from '../../core/stats.js'
+import { takeDraft } from '../../core/draft.js'
 
 /* 输入框用字符串保存，避免受控数字输入在 "1." 这类中间态被归零 */
 const id = ref('')
@@ -309,10 +316,37 @@ function onNote(e) {
 	note.value = e.detail.value
 }
 
+function previewPhoto() {
+	if (!photo.value) return
+	uni.previewImage({ urls: [photo.value] })
+}
+
 /* ---------------- 载入 ---------------- */
 
 onLoad((q) => {
 	recents.value = recentFoods(allRecords(), 12)
+
+	// 拍照识别结果（内存中转，避免超长 query）
+	if (q && q.fromDraft) {
+		const d = takeDraft()
+		if (d) {
+			items.value = (d.items || []).map(stateFromItem)
+			if (!items.value.length) items.value = [blankState()]
+			note.value = d.note || ''
+			photo.value = d.photo || ''
+			source.value = d.source || 'ai'
+			// 识别结果默认记在「现在」，并按时间自动归类餐次
+			const now = Date.now()
+			dateStr.value = todayKey()
+			timeStr.value = formatTime(now)
+			mealAuto.value = true
+			syncMeal()
+			showMacros.value = items.value.some(
+				(st) => num(st.protein) || num(st.fat) || num(st.carbs)
+			)
+			return
+		}
+	}
 
 	if (q && q.id) {
 		const r = getRecord(q.id)
@@ -405,6 +439,30 @@ function remove() {
 	.label {
 		font-size: 26rpx;
 		color: $c-text-sub;
+	}
+
+	/* ---------- 识别照片 ---------- */
+	.photo-card {
+		padding: 0;
+		overflow: hidden;
+		position: relative;
+	}
+
+	.photo {
+		width: 100%;
+		height: 380rpx;
+		display: block;
+	}
+
+	.photo-tag {
+		position: absolute;
+		right: 16rpx;
+		top: 16rpx;
+		background: rgba(34, 197, 94, 0.92);
+		color: #fff;
+		font-size: 22rpx;
+		padding: 6rpx 16rpx;
+		border-radius: 20rpx;
 	}
 
 	.head {

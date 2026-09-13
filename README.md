@@ -53,6 +53,36 @@ node scripts/serve-dist.mjs 4173 # 起静态服务
 # 然后用浏览器打开 http://localhost:4173/seed.html
 ```
 
+### 不花额度联调识别链路
+
+本地 mock 服务会返回一份固定的识别结果，可在没有 API Key 的情况下
+把「拍照 → 识别 → 确认 → 入库」整条链路走通：
+
+```bash
+node scripts/mock-dashscope.mjs 5555
+# 然后在 App「我的 → 接口地址」填 http://localhost:5555/v1
+# Key 随便填一段够长的字符串即可（mock 只检查是否存在，不校验真伪）
+```
+
+> 真机访问不了 `localhost`，请把地址换成电脑的局域网 IP，
+> 例如 `http://192.168.1.5:5555/v1`，并确保手机与电脑在同一 Wi-Fi。
+
+## 验证状态
+
+下表区分「已自动化验证」与「必须真机验证」——后者依赖摄像头、
+相册权限与原生文件系统，无法在浏览器里覆盖：
+
+| 能力 | 状态 |
+|---|---|
+| 核心逻辑（日期 / 营养换算 / 数据层 / 统计聚合） | ✅ 183 项断言 |
+| 发给 DashScope 的请求格式（data URI、鉴权头、参数） | ✅ mock `uni.request` 断言 |
+| 四个页面的渲染 | ✅ 无头浏览器 dump DOM |
+| 数据绑定数值正确性 | ✅ 与手算结果逐项比对 |
+| **拍照 → base64 转换（`plus.io.FileReader`）** | ⚠️ 需真机验证 |
+| **相机 / 相册权限拒绝后的引导** | ⚠️ 需真机验证 |
+| **照片落盘与删除（App 私有目录）** | ⚠️ 需真机验证 |
+| **云打包 APK 与安装** | ⚠️ 需 HBuilderX + DCloud 账号 |
+
 ## 目录结构
 
 ```
@@ -63,6 +93,9 @@ src/
 │   ├── nutrition.js       # per100g 基准模型、营养换算、目标推导
 │   ├── db.js              # 记录 CRUD、设置、schema 迁移、备份
 │   ├── stats.js           # 逐日序列、区间汇总、食物聚合
+│   ├── ai.js              # DashScope 客户端（JSON 容错解析 + 错误映射）
+│   ├── photo.js           # 选图 / base64 / 落盘 / 删除（平台差异收敛处）
+│   ├── draft.js           # 识别结果 → 编辑页 的内存中转
 │   └── backup.js          # 备份落盘 / 复制（平台差异收敛处）
 ├── pages/
 │   ├── index/index.vue    # 记录（首页）：今日汇总 + 餐次分组
@@ -76,9 +109,10 @@ src/
 
 scripts/
 ├── gen-tabbar-icons.mjs   # 零依赖 PNG 生成器（4x 超采样抗锯齿）
-├── test-core.mjs          # 单元测试
+├── test-core.mjs          # 单元测试 + 请求契约测试
 ├── seed-smoke.mjs         # 冒烟测试种子数据
-└── serve-dist.mjs         # 静态服务器
+├── serve-dist.mjs         # 静态服务器
+└── mock-dashscope.mjs     # 本地 mock 识别服务（不花额度联调）
 ```
 
 ## 数据模型

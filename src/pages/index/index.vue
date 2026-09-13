@@ -88,6 +88,9 @@ import { MACRO_META, MEALS } from '../../core/constants.js'
 import { addDays, dateLabel, formatTime, parseKey, todayKey } from '../../core/date.js'
 import { getSettings, recordsByDate } from '../../core/db.js'
 import { macroGoalsFromKcal, percent, recordTotals, round, sumRecords } from '../../core/nutrition.js'
+import { persistPhoto, pickImage, toBase64 } from '../../core/photo.js'
+import { recognize } from '../../core/ai.js'
+import { setDraft } from '../../core/draft.js'
 
 const dateStr = ref(todayKey())
 const records = ref([])
@@ -185,7 +188,93 @@ function addRecord(meal) {
 }
 
 function shoot() {
-	uni.showToast({ title: '拍照识别开发中', icon: 'none' })
+	const s = getSettings()
+	if (!s.apiKey) {
+		uni.showModal({
+			title: '还没配置 API Key',
+			content: '拍照识别需要阿里云百炼的 API Key。可以现在去设置里填写，也可以先手动记录。',
+			confirmText: '去设置',
+			cancelText: '手动记录',
+			success: (r) => {
+				if (r.confirm) uni.switchTab({ url: '/pages/settings/settings' })
+				else addRecord('')
+			},
+		})
+		return
+	}
+	uni.showActionSheet({
+		itemList: ['拍照', '从相册选择'],
+		success: (res) => runRecognize(res.tapIndex === 0 ? 'camera' : 'album'),
+	})
+}
+
+async function runRecognize(source) {
+	const pick = await pickImage(source)
+	if (!pick.ok) {
+		if (pick.error) uni.showToast({ title: pick.error, icon: 'none' })
+		return
+	}
+
+	uni.showLoading({ title: '读取图片…', mask: true })
+	const b64 = await toBase64(pick.path, pick.file)
+	if (!b64.ok) {
+		uni.hideLoading()
+		fallbackToManual('读取图片失败', b64.error)
+		return
+	}
+
+	uni.showLoading({ title: '识别中…', mask: true })
+	let res
+	try {
+		res = await recognize({ base64: b64.base64, mime: b64.mime, settings: getSettings() })
+	} catch (e) {
+		res = { ok: false, error: '识别过程出错' }
+	}
+	uni.hideLoading()
+
+	if (!res.ok) {
+		fallbackToManual('识别失败', res.error + (res.detail ? `\n${res.detail}` : ''))
+		return
+	}
+
+	if (!res.isFood) {
+		uni.showModal({
+			title: '没识别到食物',
+			content: res.reason || '照片里似乎没有食物',
+			confirmText: '手动记录',
+			cancelText: '重拍',
+			success: (r) => {
+				if (r.confirm) addRecord('')
+			},
+		})
+		return
+	}
+
+	// 照片落盘失败不阻塞记录（缺口 B4：任何一步失败都要能退回手动）
+	let photo = ''
+	if (getSettings().storePhoto) {
+		try {
+			const saved = await persistPhoto(pick.path)
+			if (saved.ok) photo = saved.path
+		} catch (e) {
+			photo = ''
+		}
+	}
+
+	setDraft({ items: res.items, note: res.note, photo, source: 'ai' })
+	uni.navigateTo({ url: '/pages/record/edit?fromDraft=1' })
+}
+
+function fallbackToManual(title, content) {
+	uni.showModal({
+		title,
+		content: content || '请重试或改用手动记录',
+		confirmText: '手动记录',
+		cancelText: '知道了',
+		success: (r) => {
+			if (r.confirm) addRecord('')
+		},
+	})
 }
 </script>
 

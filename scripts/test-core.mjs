@@ -57,6 +57,16 @@ import {
 	chartData,
 } from '../src/core/stats.js'
 import { DEFAULT_DAILY_GOAL } from '../src/core/constants.js'
+import {
+	RECOGNITION_PROMPT,
+	PING_PROMPT,
+	extractJson,
+	normalizeRecognition,
+	chatUrl,
+	httpError,
+	recognize,
+	testConnection,
+} from '../src/core/ai.js'
 
 /* ---------------- 极简测试框架 ---------------- */
 let pass = 0
@@ -88,6 +98,10 @@ function ok(cond, label) {
 const store = new Map()
 const removedFiles = []
 
+/** 可控制的假 uni.request：捕获请求 + 回放预设响应 */
+let lastRequest = null
+let nextResponse = null
+
 globalThis.uni = {
 	getStorageSync: (k) => (store.has(k) ? store.get(k) : ''),
 	setStorageSync: (k, v) => {
@@ -98,6 +112,21 @@ globalThis.uni = {
 	},
 	removeSavedFile: ({ filePath }) => {
 		removedFiles.push(filePath)
+	},
+	request: (opts) => {
+		lastRequest = opts
+		const r = nextResponse
+		setTimeout(() => {
+			if (!r) {
+				opts.fail({ errMsg: 'request:fail' })
+				return
+			}
+			if (r.fail) {
+				opts.fail(r.fail)
+				return
+			}
+			opts.success({ statusCode: r.statusCode, data: r.data })
+		}, 0)
 	},
 }
 
@@ -404,6 +433,206 @@ const chart = chartData(series)
 eq(chart.max, 232, '柱状图最大值')
 eq(chart.bars.map((b) => b.ratio), [1, 0, 1], '柱高比例')
 eq(chartData([{ date: 'x', totals: { kcal: 0 } }]).bars[0].ratio, 0, '全 0 时比例不除零')
+
+/* ================= ai.js ================= */
+group('ai.js · JSON 提取容错（缺口 B2）')
+eq(extractJson('{"a":1}'), { a: 1 }, '纯 JSON')
+eq(extractJson('```json\n{"a":1}\n```'), { a: 1 }, '剥离 markdown 围栏')
+eq(extractJson('```\n{"a":1}\n```'), { a: 1 }, '剥离无语言标记的围栏')
+eq(extractJson('好的，结果如下：\n{"a":1}\n以上。'), { a: 1 }, '前后有解释文字也能截取')
+eq(extractJson('{"a":{"b":[1,2]}}'), { a: { b: [1, 2] } }, '嵌套结构')
+eq(extractJson('\uFEFF{"a":1}'), { a: 1 }, '去掉 BOM')
+eq(extractJson('这不是 JSON'), null, '无法解析返回 null')
+eq(extractJson(''), null, '空字符串返回 null')
+eq(extractJson(null), null, 'null 输入不抛异常')
+
+group('ai.js · 识别结果规范化（缺口 B1）')
+const notFood = normalizeRecognition({ isFood: false, reason: '这是一张风景照' })
+eq(notFood.ok, true, '非食物仍算请求成功')
+eq(notFood.isFood, false, 'isFood=false 透传')
+eq(notFood.reason, '这是一张风景照', '带出原因给用户')
+
+const good = normalizeRecognition({
+	isFood: true,
+	items: [
+		{
+			name: '米饭',
+			grams: 200,
+			kcalPer100g: 116,
+			proteinPer100g: 2.6,
+			fatPer100g: 0.3,
+			carbsPer100g: 25.9,
+			confidence: 0.8,
+		},
+	],
+	note: '光线较暗',
+})
+eq(good.ok, true, '正常识别')
+eq(good.items.length, 1, '条目数')
+eq(
+	good.items[0].per100,
+	{ kcal: 116, protein: 2.6, fat: 0.3, carbs: 25.9 },
+	'kcalPer100g 系列字段正确映射到内部 per100 结构'
+)
+eq(good.items[0].grams, 200, '克数保留')
+eq(good.items[0].confidence, 0.8, '置信度保留')
+eq(good.note, '光线较暗', 'note 保留')
+
+const alias = normalizeRecognition({
+	isFood: true,
+	items: [{ name: 'x', grams: 100, kcal: 50, protein: 1 }],
+})
+eq(alias.items[0].per100.kcal, 50, '兼容 kcal 别名')
+eq(alias.items[0].per100.protein, 1, '兼容 protein 别名')
+
+const dirty = normalizeRecognition({
+	isFood: true,
+	items: [
+		{ name: '', grams: 100, kcalPer100g: 100 },
+		{ name: '零克数', grams: 0, kcalPer100g: 100 },
+		{ name: '有效条目', grams: 100, kcalPer100g: 100 },
+	],
+})
+eq(dirty.items.length, 1, '过滤无名 / 零克数的脏条目')
+eq(dirty.items[0].name, '有效条目', '保留合法条目')
+
+eq(normalizeRecognition({ isFood: true, items: [] }).ok, false, '无有效条目标记为失败')
+eq(normalizeRecognition(null).ok, false, 'null 输入标记为失败')
+eq(normalizeRecognition('字符串').ok, false, '非对象输入标记为失败')
+
+group('ai.js · 请求构造与错误映射')
+eq(
+	chatUrl('https://dashscope.aliyuncs.com/compatible-mode/v1'),
+	'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+	'拼接 chat/completions'
+)
+eq(chatUrl('https://x.com/v1///'), 'https://x.com/v1/chat/completions', '去掉多余的斜杠')
+eq(
+	chatUrl(''),
+	'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+	'空值回退到默认地址'
+)
+ok(httpError(401).indexOf('API Key') >= 0, '401 → Key 无效提示')
+ok(httpError(429).indexOf('频繁') >= 0, '429 → 限流提示')
+ok(httpError(404).indexOf('不存在') >= 0, '404 → 地址/模型不存在')
+ok(httpError(503).indexOf('服务端') >= 0, '5xx → 服务端错误')
+eq(
+	httpError(400, { error: { message: 'model not found' } }),
+	'model not found',
+	'400 优先带出服务端原始详情'
+)
+
+ok(RECOGNITION_PROMPT.indexOf('JSON') >= 0, '提示词含 JSON 关键字（json_object 模式的前置要求）')
+ok(RECOGNITION_PROMPT.indexOf('isFood') >= 0, '提示词覆盖非食物场景')
+ok(RECOGNITION_PROMPT.indexOf('营养成分表') >= 0, '提示词覆盖营养标签 OCR 场景（B6）')
+ok(RECOGNITION_PROMPT.indexOf('拆分') >= 0, '提示词要求拆分混合菜品')
+
+/* ================= ai.js 网络契约 ================= */
+group('ai.js · 发给 DashScope 的真实请求格式')
+
+const apiSettings = {
+	apiKey: 'sk-test-key',
+	baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+	model: 'qwen3-vl-flash',
+}
+
+nextResponse = {
+	statusCode: 200,
+	data: {
+		model: 'qwen3-vl-flash',
+		choices: [
+			{
+				message: {
+					content: JSON.stringify({
+						isFood: true,
+						items: [
+							{
+								name: '米饭',
+								grams: 200,
+								kcalPer100g: 116,
+								proteinPer100g: 2.6,
+								fatPer100g: 0.3,
+								carbsPer100g: 25.9,
+							},
+						],
+					}),
+				},
+			},
+		],
+	},
+}
+
+const wire = await recognize({ base64: 'AAABBBCCC', mime: 'image/jpeg', settings: apiSettings })
+
+eq(wire.ok, true, '识别成功')
+eq(wire.isFood, true, 'isFood=true')
+eq(wire.items.length, 1, '解析出 1 个条目')
+eq(wire.items[0].per100.kcal, 116, '营养素解析正确')
+
+eq(lastRequest.method, 'POST', 'POST 方法')
+eq(
+	lastRequest.url,
+	'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+	'请求地址 = baseUrl + /chat/completions'
+)
+eq(lastRequest.header.Authorization, 'Bearer sk-test-key', 'Bearer 鉴权头')
+eq(
+	lastRequest.header['Content-Type'],
+	'application/json',
+	'JSON 内容类型'
+)
+eq(lastRequest.data.model, 'qwen3-vl-flash', 'model 透传')
+eq(lastRequest.data.temperature, 0, 'temperature 固定 0（贪心解码，结果稳定）')
+eq(
+	lastRequest.data.response_format,
+	{ type: 'json_object' },
+	'启用 JSON 输出模式'
+)
+ok(lastRequest.data.max_tokens > 0, '设置 max_tokens 上限')
+ok(lastRequest.timeout >= 30000, '超时 >= 30s（视觉模型响应较慢）')
+
+const content = lastRequest.data.messages[0].content
+eq(Array.isArray(content), true, 'content 为数组形式（多模态）')
+eq(content.length, 2, '含图片 + 文本两部分')
+eq(content[0].type, 'image_url', '第一段是 image_url')
+eq(
+	content[0].image_url.url,
+	'data:image/jpeg;base64,AAABBBCCC',
+	'★ 图片为 data URI 格式（DashScope 文档要求的写法）'
+)
+eq(content[1].type, 'text', '第二段是文本提示词')
+eq(content[1].text, RECOGNITION_PROMPT, '提示词完整下发')
+
+// 错误路径
+nextResponse = { statusCode: 401, data: { error: { message: 'Invalid API-key' } } }
+const unauth = await recognize({ base64: 'x', settings: apiSettings })
+eq(unauth.ok, false, '401 识别失败')
+ok(unauth.error.indexOf('API Key') >= 0, '401 映射为可操作的中文提示')
+
+nextResponse = { statusCode: 200, data: { choices: [{ message: { content: '抱歉我无法识别' } }] } }
+const badJson = await recognize({ base64: 'x', settings: apiSettings })
+eq(badJson.ok, false, '模型返回非 JSON → 失败而不是崩溃')
+ok(badJson.error.indexOf('JSON') >= 0, '提示无法解析为 JSON')
+
+nextResponse = { fail: { errMsg: 'request:fail timeout' } }
+const timeoutRes = await recognize({ base64: 'x', settings: apiSettings })
+eq(timeoutRes.ok, false, '超时失败')
+ok(timeoutRes.error.indexOf('超时') >= 0, '超时映射为中文提示')
+
+group('ai.js · 测连通（缺口 C2）')
+nextResponse = {
+	statusCode: 200,
+	data: { model: 'qwen3-vl-flash', choices: [{ message: { content: '{"ok":true}' } }] },
+}
+const ping = await testConnection(apiSettings)
+eq(ping.ok, true, '测连通成功')
+eq(ping.model, 'qwen3-vl-flash', '回显实际模型名')
+eq(lastRequest.data.messages[0].content, PING_PROMPT, '测连通只发纯文本，不消耗图片额度')
+
+eq(lastRequest.timeout, 20000, '测连通用更短的超时')
+
+const noKey = await testConnection({ apiKey: '', model: 'qwen3-vl-flash' })
+eq(noKey.ok, false, '空 Key 直接拒绝，不发请求')
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
