@@ -198,7 +198,7 @@ import {
 	getRecord,
 	saveRecord,
 } from '../../core/db.js'
-import { itemTotals, sumItems } from '../../core/nutrition.js'
+import { itemTotals, round, sumItems } from '../../core/nutrition.js'
 import { recentFoods } from '../../core/stats.js'
 import { takeDraft } from '../../core/draft.js'
 

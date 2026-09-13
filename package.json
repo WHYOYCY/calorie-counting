@@ -10,7 +10,10 @@
     "build:h5": "uni build",
     "build:app": "uni build -p app",
     "build:app-android": "uni build -p app-android",
-    "test": "esbuild scripts/test-core.mjs --bundle --platform=node --format=esm --outfile=node_modules/.cache/cc-test.mjs --log-level=warning && node node_modules/.cache/cc-test.mjs"
+    "test": "node scripts/check-templates.mjs && esbuild scripts/test-core.mjs --bundle --platform=node --format=esm --outfile=node_modules/.cache/cc-test.mjs --log-level=warning && node node_modules/.cache/cc-test.mjs",
+    "test:core": "esbuild scripts/test-core.mjs --bundle --platform=node --format=esm --outfile=node_modules/.cache/cc-test.mjs --log-level=warning && node node_modules/.cache/cc-test.mjs",
+    "check": "node scripts/check-templates.mjs",
+    "icons": "node scripts/gen-icons.mjs"
   },
   "dependencies": {
     "@dcloudio/uni-app": "3.0.0-5020420260813003",
