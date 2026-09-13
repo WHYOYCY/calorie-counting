@@ -64,7 +64,16 @@ const SETTINGS = {
 // uni-app H5 的存储格式为 JSON.stringify({ type, data })
 const wrap = (v) => JSON.stringify({ type: typeof v, data: v })
 
-const html = `<!DOCTYPE html>
+/**
+ * 生成一个「灌数据 + 跳转目标页」的页面。
+ *
+ * 为什么不用「先开 seed.html 再开目标页」的两步法：
+ * 那个做法依赖浏览器 profile 的 localStorage 落盘，
+ * 在 --screenshot 模式下实测不稳定（有时第二次启动读到的是空存储）。
+ * 每次生成一个直达目标页的种子页，就只需一次浏览器启动，结果稳定。
+ */
+function seedPage(to) {
+	return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>seed</title></head>
 <body>
 <script>
@@ -72,18 +81,26 @@ localStorage.clear();
 localStorage.setItem('cc_records', ${JSON.stringify(wrap(JSON.stringify(RECORDS)))});
 localStorage.setItem('cc_settings', ${JSON.stringify(wrap(JSON.stringify(SETTINGS)))});
 localStorage.setItem('cc_meta', ${JSON.stringify(
-	wrap(JSON.stringify({ schemaVersion: 1 }))
-)});
+		wrap(JSON.stringify({ schemaVersion: 1 }))
+	)});
 localStorage.setItem('uni-storage-keys', ${JSON.stringify(
-	wrap(JSON.stringify(['cc_records', 'cc_settings', 'cc_meta']))
-)});
-location.replace('/#/pages/index/index');
+		wrap(JSON.stringify(['cc_records', 'cc_settings', 'cc_meta']))
+	)});
+location.replace('${to}');
 </script>
 </body></html>
 `
+}
 
-const out = path.join(DIST, 'seed.html')
-fs.writeFileSync(out, html)
+const TARGETS = [
+	['seed.html', '/#/pages/index/index'],
+	['seed-stats.html', '/#/pages/stats/stats'],
+	['seed-edit.html', `/#/pages/record/edit?date=${KEY}&meal=lunch`],
+]
+
+for (const [file, to] of TARGETS) {
+	fs.writeFileSync(path.join(DIST, file), seedPage(to))
+}
 
 // 顺手算出预期值，方便截图时对照（与 core/nutrition 同一套算式）
 const r1 = (n) => Math.round(n * 10) / 10
@@ -98,7 +115,7 @@ const per = (mealKey) => {
 }
 const total = r1(RECORDS.reduce((s, r) => r1(s + kcalOf(r.items)), 0))
 
-console.log(`✓ 已生成 ${out}`)
+console.log(`✓ 已生成 ${TARGETS.length} 个种子页: ${TARGETS.map((t) => t[0]).join(', ')}`)
 console.log(`  日期键: ${KEY}`)
 console.log(`  预期合计: ${total} kcal`)
 console.log(

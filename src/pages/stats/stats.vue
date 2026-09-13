@@ -31,7 +31,7 @@
 		<view class="card">
 			<text class="kicker">总摄入</text>
 			<view class="hero">
-				<text class="hero-num num">{{ summary.totals.kcal }}</text>
+				<text class="hero-num num">{{ round(summary.totals.kcal, 0) }}</text>
 				<text class="hero-unit">kcal</text>
 			</view>
 
@@ -153,7 +153,7 @@ import {
 	todayKey,
 } from '../../core/date.js'
 import { getSettings, recordsInRange } from '../../core/db.js'
-import { groupDigits, percent } from '../../core/nutrition.js'
+import { groupDigits, percent, round } from '../../core/nutrition.js'
 import { mealBreakdown, rangeSummary, topFoods } from '../../core/stats.js'
 
 const MODES = [
