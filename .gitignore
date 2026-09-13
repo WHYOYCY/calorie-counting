@@ -3,8 +3,15 @@ node_modules/
 
 # 构建产物
 dist/
-unpackage/
 unpackage-res/
+
+# unpackage 整体忽略，但 App 图标要保留：
+# manifest.json 直接引用 unpackage/res/icons/*.png，
+# 若不进版本库，别人 clone 后打包会因找不到图标而失败
+unpackage/*
+!unpackage/res
+unpackage/res/*
+!unpackage/res/icons
 
 # HBuilderX
 .hbuilderx/
