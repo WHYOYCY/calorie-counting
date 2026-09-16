@@ -143,7 +143,7 @@ import {
 	round,
 	sumRecords,
 } from '../../core/nutrition.js'
-import { persistPhoto, pickImage, toBase64 } from '../../core/photo.js'
+import { persistPhoto, photoPathFor, pickImage, toBase64 } from '../../core/photo.js'
 import { recognize } from '../../core/ai.js'
 import { setDraft } from '../../core/draft.js'
 
@@ -353,17 +353,36 @@ async function runRecognize(source) {
 		return
 	}
 
-	let photo = ''
+	// 落盘失败（典型是 H5：没有长期文件系统）就退回 data URL，
+	// 至少本次会话里编辑页看得见刚拍的照片。
+	// 不用 blob: URL —— 它的生命周期绑在创建它的文档上，
+	// 且在部分环境下 <image> 不渲染；data URL 到处都能渲染。
+	// 另外这里直接用手上已有的 base64，不需要多读一次图。
+	const fallback = `data:${b64.mime};base64,${b64.base64}`
+	let photo = fallback
+	let photoTransient = true
 	if (getSettings().storePhoto) {
 		try {
 			const saved = await persistPhoto(pick.path)
-			if (saved.ok) photo = saved.path
+			photo = photoPathFor(saved, fallback)
+			photoTransient = !saved.ok
 		} catch (e) {
-			photo = ''
+			photo = photoPathFor(null, fallback)
 		}
 	}
+	// 注意：即使用户关掉了「保存照片」，这里仍然把照片带进编辑页，
+	// 只是标记为临时（保存记录时不写进去）。
+	// 否则关闭该设置后，刚拍完照片编辑页也什么都不显示，很莫名其妙。
 
-	setDraft({ items: res.items, note: res.note, photo, source: 'ai' })
+	setDraft({
+		items: res.items,
+		note: res.note,
+		photo,
+		// 临时路径（data URL）不写进记录：一是撑爆本地存储，
+		// 二是记录里存一份巨大的 base64 字符串没有意义
+		photoTransient,
+		source: 'ai',
+	})
 	uni.navigateTo({ url: '/pages/record/edit?fromDraft=1' })
 }
 

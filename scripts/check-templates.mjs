@@ -119,6 +119,28 @@ function referencedNames(template) {
 	return { refs, locals }
 }
 
+/**
+ * 照片路径必须经过转换再交给 <image src>。
+ *
+ * 存进库的路径在 App 端可能是 _doc/xxx 这类本地 URL，直接绑给 image
+ * 在部分基座上渲染不出来（本次「拍完照不显示」bug 的一部分）。
+ * 约定：要么显式调 photoSrc(...)，要么用一个 *View 的 computed（内部调 photoSrc）。
+ */
+function unsafeImageSrc(tpl) {
+	const out = []
+	const re = /<image\b[^>]*>/g
+	let m
+	while ((m = re.exec(tpl))) {
+		const s = m[0].match(/:src\s*=\s*"([^"]*)"/)
+		if (!s) continue
+		const expr = s[1]
+		if (!/\bphoto\b/i.test(expr)) continue
+		if (/photoSrc\s*\(/.test(expr) || /View\b/.test(expr)) continue
+		out.push(expr)
+	}
+	return out
+}
+
 /** 递归收集所有 .vue */
 function walk(dir, out = []) {
 	for (const name of fs.readdirSync(dir)) {
@@ -151,10 +173,15 @@ for (const file of files) {
 	}
 
 	const rel = path.relative(process.cwd(), file)
-	if (missing.length) {
+	const badSrc = unsafeImageSrc(tplMatch[1])
+	if (missing.length || badSrc.length) {
 		problems++
 		console.log(`✗ ${rel}`)
 		for (const m of missing.sort()) console.log(`    模板引用了但脚本未声明: ${m}`)
+		for (const e of badSrc) {
+			console.log(`    照片路径未转换就给了 image src: :src="${e}"`)
+			console.log('      （应改为 photoSrc(…) 或一个内部调用 photoSrc 的 *View computed）')
+		}
 	} else {
 		console.log(`✓ ${rel}`)
 	}

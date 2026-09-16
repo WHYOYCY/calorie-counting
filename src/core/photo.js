@@ -18,7 +18,7 @@ function guessMime(path) {
 	return 'image/jpeg'
 }
 
-function splitDataUrl(dataUrl) {
+export function splitDataUrl(dataUrl) {
 	const s = String(dataUrl || '')
 	const comma = s.indexOf(',')
 	if (comma < 0) return { base64: '', mime: 'image/jpeg' }
@@ -152,6 +152,26 @@ function readByFileReader(file) {
 }
 
 /**
+ * blob: / data: 形式的图片 → base64。
+ *
+ * H5 落盘失败时会退回临时路径（blob: URL），后续「识别填充」得能读它，
+ * 否则刚拍完照片点识别就是「读取图片失败」。
+ */
+async function readByUrl(url) {
+	const u = String(url || '')
+	if (!/^(blob:|data:)/i.test(u) || typeof fetch !== 'function') {
+		return { ok: false, fallback: true }
+	}
+	try {
+		const res = await fetch(u)
+		const blob = await res.blob()
+		return await readByFileReader(blob)
+	} catch (e) {
+		return { ok: false, fallback: true }
+	}
+}
+
+/**
  * 图片 → base64。
  * @param {string} path 临时文件路径
  * @param {Blob}   [file] H5 下 chooseImage 给出的 File 对象
@@ -162,11 +182,15 @@ export async function toBase64(path, file) {
 	const byFile = await readByFileReader(file)
 	if (byFile.ok) return byFile
 
+	// 次选：blob: / data: URL（H5 落盘失败后的兜底路径）
+	const byUrl = await readByUrl(path)
+	if (byUrl.ok) return byUrl
+
 	// App 首选：plus.io
 	const byPlus = await readByPlusIo(path)
 	if (byPlus.ok) return byPlus
 
-	// 次选：小程序/部分 App 运行时的文件系统 API
+	// 再次：小程序/部分 App 运行时的文件系统 API
 	const byFs = await readByFileSystemManager(path)
 	if (byFs.ok) return byFs
 
@@ -221,32 +245,78 @@ function byUniRemove(path) {
 	}
 }
 
+/**
+ * 决定记录里该用哪个照片路径。
+ *
+ * 落盘成功 → 用持久路径（App 私有目录，重启后仍在）。
+ * 落盘失败 → 退回临时路径。典型场景是 H5：没有长期文件系统，
+ *            但本次会话里编辑页仍应看得见刚拍的照片。
+ *
+ * 首页拍照那条路径原先缺这个兜底，落盘一失败 photo 就是空字符串，
+ * 于是编辑页显示的是「拍照留档」空状态 —— 刚拍的照片看不见。
+ * 编辑页自己的 capturePhoto 则有兜底，两边行为不一致。
+ * 抽成函数让两边共用，以后不会再跑偏。
+ */
+export function photoPathFor(saved, tempPath) {
+	if (saved && saved.ok && saved.path) return saved.path
+	return tempPath || ''
+}
+
 /** 删除照片文件（不抛异常，失败静默） */
 export function deletePhotoFile(path) {
-	if (!path) return
+	const p = String(path || '')
+	if (!p) return
+	// _doc/xxx 这类本地 URL、/storage/... 这类原生绝对路径、file:// 形式，
+	// plus.io 都能解析。早先只认 _doc 开头，存了原生绝对路径时照片文件
+	// 就永远删不掉（记录没了，文件还在沙箱里堆着）。
+	const plusCanResolve =
+		typeof plus !== 'undefined' &&
+		plus &&
+		plus.io &&
+		typeof plus.io.resolveLocalFileSystemURL === 'function' &&
+		/^(_|file:\/\/|\/)/.test(p)
+
+	if (plusCanResolve) {
+		plus.io.resolveLocalFileSystemURL(
+			p,
+			(entry) => {
+				entry.remove(
+					() => {},
+					() => byUniRemove(p)
+				)
+			},
+			() => byUniRemove(p)
+		)
+		return
+	}
+	byUniRemove(p)
+}
+
+/**
+ * 照片路径 → 可直接给 <image src> 用的形式。
+ *
+ * H5 / 网络 / data: / blob: 原样返回。
+ * App 端把 _doc/xxx 这类本地 URL 转成平台绝对路径：image 组件官方
+ * 列明的本地形式是「绝对路径」，而 fullPath 到底返回相对还是绝对
+ * 在官方文档与社区实测之间说法不一，所以不赌某一种，在渲染前统一转换。
+ * 转换失败就原样返回，不会比不转更糟。
+ */
+export function photoSrc(path) {
+	const p = String(path || '')
+	if (!p) return ''
+	if (/^(data:|blob:|https?:|file:)/i.test(p)) return p
 	if (
 		typeof plus !== 'undefined' &&
 		plus &&
 		plus.io &&
-		plus.io.resolveLocalFileSystemURL &&
-		String(path).indexOf('_doc') === 0
+		typeof plus.io.convertLocalFileSystemURL === 'function'
 	) {
-		plus.io.resolveLocalFileSystemURL(
-			path,
-			(entry) => {
-				entry.remove(
-					() => {},
-					() => byUniRemove(path)
-				)
-			},
-			() => byUniRemove(path)
-		)
-		return
+		try {
+			const abs = plus.io.convertLocalFileSystemURL(p)
+			if (abs) return abs
+		} catch (e) {
+			/* 转换失败就用原路径 */
+		}
 	}
-	byUniRemove(path)
-}
-
-/** 照片是否可显示 */
-export function photoSrc(path) {
-	return path || ''
+	return p
 }

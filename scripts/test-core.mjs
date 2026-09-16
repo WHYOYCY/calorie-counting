@@ -60,6 +60,7 @@ import {
 	chartData,
 } from '../src/core/stats.js'
 import { DEFAULT_DAILY_GOAL } from '../src/core/constants.js'
+import { photoPathFor, photoSrc, deletePhotoFile, splitDataUrl } from '../src/core/photo.js'
 import {
 	RECOGNITION_PROMPT,
 	PING_PROMPT,
@@ -744,6 +745,52 @@ _resetCache()
 initDB()
 eq(getRecord(pinned.id).updatedAt, stampBefore, '冷启动重读不改 updatedAt')
 eq(getRecord(pinned.id).createdAt, pinned.createdAt, '冷启动重读不改 createdAt')
+
+/* ========== 回归：拍完照编辑页不显示 ========== */
+group('photo.js · 照片路径决策（回归：拍完照编辑页不显示照片）')
+
+eq(
+	photoPathFor({ ok: true, path: '_doc/food/a.jpg' }, 'blob:tmp'),
+	'_doc/food/a.jpg',
+	'落盘成功 → 用持久路径'
+)
+eq(
+	photoPathFor({ ok: false }, 'blob:tmp'),
+	'blob:tmp',
+	'★ 落盘失败 → 退回临时路径（原先返回空字符串，编辑页只能显示空状态）'
+)
+eq(photoPathFor(null, 'blob:tmp'), 'blob:tmp', '落盘抛异常也退回临时路径')
+eq(
+	photoPathFor({ ok: true, path: '' }, 'blob:tmp'),
+	'blob:tmp',
+	'落盘返回空路径时退回'
+)
+eq(photoPathFor({ ok: false }, ''), '', '两者都没有则为空')
+eq(photoPathFor(undefined, undefined), '', '全空不报错')
+
+group('photo.js · photoSrc 渲染路径')
+
+eq(photoSrc(''), '', '空路径返回空')
+eq(photoSrc('blob:http://x/abc'), 'blob:http://x/abc', 'blob: 原样返回')
+eq(photoSrc('data:image/jpeg;base64,AAA'), 'data:image/jpeg;base64,AAA', 'data: 原样返回')
+eq(photoSrc('https://x/a.jpg'), 'https://x/a.jpg', '网络路径原样返回')
+eq(photoSrc('file:///a.jpg'), 'file:///a.jpg', 'file:// 原样返回')
+// Node 里没有 plus，应原样返回而不是抛异常
+eq(photoSrc('_doc/food/a.jpg'), '_doc/food/a.jpg', '无 plus 环境原样返回')
+eq(photoSrc(null), '', 'null 返回空')
+
+group('photo.js · 删除照片对各种路径形式都不抛异常')
+deletePhotoFile('')
+deletePhotoFile('_doc/food/a.jpg')
+deletePhotoFile('/storage/emulated/0/x.jpg')
+deletePhotoFile('file:///x.jpg')
+deletePhotoFile('blob:xxx')
+deletePhotoFile(null)
+ok(true, '六种路径形式调用均未抛异常')
+
+eq(splitDataUrl('data:image/png;base64,QUJD').mime, 'image/png', 'data URL 解析出 mime')
+eq(splitDataUrl('data:image/png;base64,QUJD').base64, 'QUJD', 'data URL 解析出 base64')
+eq(splitDataUrl('garbage').base64, '', '非法 data URL 返回空')
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

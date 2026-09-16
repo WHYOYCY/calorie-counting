@@ -3,7 +3,7 @@
 		<!-- 照片：手动添加路径同样可以拍照留档或识别填充 -->
 		<view class="card photo-card">
 			<template v-if="photo">
-				<image class="photo" :src="photo" mode="aspectFill" @click="previewPhoto" />
+				<image class="photo" :src="photoView" mode="aspectFill" @click="previewPhoto" />
 				<text class="photo-tag" v-if="source === 'ai'">AI 识别</text>
 				<view class="photo-acts">
 					<view class="photo-act" @click="recognizeCurrentPhoto">识别填充</view>
@@ -217,7 +217,7 @@ import {
 import { itemTotals, round, sumItems } from '../../core/nutrition.js'
 import { recentFoods } from '../../core/stats.js'
 import { takeDraft } from '../../core/draft.js'
-import { persistPhoto, pickImage, toBase64 } from '../../core/photo.js'
+import { persistPhoto, photoPathFor, photoSrc, pickImage, toBase64 } from '../../core/photo.js'
 import { recognize } from '../../core/ai.js'
 
 /* 输入框用字符串保存，避免受控数字输入在 "1." 这类中间态被归零 */
@@ -229,6 +229,17 @@ const mealAuto = ref(true)
 const items = ref([])
 const note = ref('')
 const photo = ref('')
+/**
+ * 照片只是「本次会话临时可见」（H5 落盘失败后的 blob: 路径）。
+ * 这种路径重启后就失效，保存时不能写进记录，否则留下永远显示不出来的死链接。
+ */
+const photoTransient = ref(false)
+/**
+ * 给 <image src> 用的路径。
+ * App 端需要把 _doc/xxx 这类本地 URL 转成平台绝对路径才能稳定渲染，
+ * 用 computed 避免每次重渲染都调一次原生转换。
+ */
+const photoView = computed(() => photoSrc(photo.value))
 const source = ref('manual')
 const createdAt = ref(0)
 const showMacros = ref(false)
@@ -347,7 +358,8 @@ function onNote(e) {
 
 function previewPhoto() {
 	if (!photo.value) return
-	uni.previewImage({ urls: [photo.value] })
+	// 用转换后的路径，App 端 _doc/xxx 直接给 previewImage 可能打不开
+	uni.previewImage({ urls: [photoView.value] })
 }
 
 /* ---------------- 照片：留档 / 识别填充 ---------------- */
@@ -396,11 +408,23 @@ async function capturePhoto(source, thenRecognize) {
 
 	uni.showLoading({ title: '处理照片…', mask: true })
 	const saved = await persistPhoto(pick.path)
-	uni.hideLoading()
 
-	// 落盘失败（如 H5）就退回临时路径，至少本次会话可见
-	photo.value = saved.ok ? saved.path : pick.path
-	if (saved.ok) lastFile.value = null
+	if (saved.ok) {
+		photo.value = photoPathFor(saved, '')
+		photoTransient.value = false
+		lastFile.value = null
+	} else {
+		// 落盘失败（典型是 H5）：退回本次会话可见的 data URL。
+		// 不用 pick.path（H5 下是 blob: URL）—— blob 生命周期绑在
+		// 创建它的文档上，且在部分环境下 <image> 不渲染。
+		const b64 = await toBase64(pick.path, pick.file)
+		photo.value = photoPathFor(
+			null,
+			b64.ok ? `data:${b64.mime};base64,${b64.base64}` : pick.path
+		)
+		photoTransient.value = true
+	}
+	uni.hideLoading()
 
 	if (thenRecognize) await recognizeCurrentPhoto()
 	else uni.showToast({ title: '照片已添加', icon: 'none' })
@@ -494,6 +518,7 @@ function removePhoto() {
 		success: (r) => {
 			if (!r.confirm) return
 			photo.value = ''
+			photoTransient.value = false
 			lastFile.value = null
 			if (source.value === 'ai') source.value = 'manual'
 		},
@@ -513,6 +538,7 @@ onLoad((q) => {
 			if (!items.value.length) items.value = [blankState()]
 			note.value = d.note || ''
 			photo.value = d.photo || ''
+			photoTransient.value = !!d.photoTransient
 			source.value = d.source || 'ai'
 			// 识别结果默认记在「现在」，并按时间自动归类餐次
 			const now = Date.now()
@@ -547,6 +573,7 @@ onLoad((q) => {
 		if (!items.value.length) items.value = [blankState()]
 		note.value = r.note || ''
 		photo.value = r.photo || ''
+		photoTransient.value = false
 		source.value = r.source || 'manual'
 		createdAt.value = r.createdAt || 0
 		showMacros.value = (r.items || []).some(
@@ -588,7 +615,8 @@ function save() {
 		mealAuto: mealAuto.value,
 		items: valid,
 		note: note.value,
-		photo: photo.value,
+		// 临时路径不进库：重启后是死链接，不如不存
+		photo: photoTransient.value ? '' : photo.value,
 		source: source.value,
 		createdAt: createdAt.value || undefined,
 	})
