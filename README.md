@@ -61,23 +61,24 @@ node scripts/mock-dashscope.mjs 5555
 ## 测试
 
 ```bash
-npm test          # 模板绑定检查 + 核心逻辑单元测试
-npm run check     # 静态检查（模板绑定 + Native.js 类导入）
+npm test          # 静态检查 + 核心逻辑单元测试
+npm run check     # 只跑静态检查（模板绑定 + Native.js 类导入）
 npm run test:core # 只跑核心逻辑单元测试
 ```
 
- 是两道静态检查，Unknown command: "test"
-
-
-Did you mean this?
-  npm test # Test a package
-To see a list of supported npm commands, run:
-  npm help 在其之上再跑单元测试。
+`npm run check` 是两道静态检查，`npm test` 在其之上再跑单元测试。
 
 1. **模板绑定检查**（`scripts/check-templates.mjs`）—— 把模板里引用到的标识符与
    `<script setup>` 里声明的名字做差集。这类错误单元测试完全抓不到
    （逻辑层本身是对的），只在渲染时才炸 `Property "x" was accessed during render`。
-2. **核心逻辑单元测试**（405 项断言）—— 日期与餐次归类、营养换算、
+   顺带还查一件事：`<image>` 的 `:src` 若引用了 `photo` 却既不调
+   `photoSrc(...)` 也不是 `*View` computed，直接报错 —— 存储路径不能裸绑给图片。
+
+2. **Native.js 类导入检查**（`scripts/check-native.mjs`）——
+   `plus.android.importClass()` **不会在当前作用域创建同名绑定**，
+   不接收返回值就等于没导入，真机会报「Xxx is not defined」。
+   这类错误单元测试永远抓不到：测试里的假 plus 是手写的，类永远存在。
+3. **核心逻辑单元测试**（405 项断言）—— 日期与餐次归类、营养换算、
    数据层增删改查与迁移、统计聚合、DashScope 请求契约。
 
 核心逻辑（`src/core/`）不依赖 uni 运行时，靠运行时特性探测解耦，
@@ -125,6 +126,7 @@ scripts/
 ├── gen-icons.mjs          # 零依赖 PNG 生成器（4x 超采样抗锯齿）
 ├── test-core.mjs          # 单元测试 + 请求契约测试
 ├── check-templates.mjs    # 模板绑定静态检查
+├── check-native.mjs       # Native.js 类导入静态检查
 ├── seed-smoke.mjs         # 冒烟测试种子页生成器
 ├── serve-dist.mjs         # 静态服务器
 ├── measure.mjs            # 注入探针测量 rem 缩放，排查布局问题
