@@ -720,7 +720,8 @@ function doClear() {
 
 <style lang="scss" scoped>
 	.page {
-		padding: $s-3 $s-4 $s-6;
+		/* 底部留出 tabbar 的高度，滚到底时最后一张卡片不会被压住 */
+		padding: $s-3 $s-4 calc(#{$h-tabbar} + #{$s-4});
 	}
 
 	/* ---------- 分区标题 ---------- */

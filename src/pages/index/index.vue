@@ -1,7 +1,7 @@
 <template>
 	<view class="page">
-		<!-- 日期切换 -->
-		<view class="head">
+		<!-- 日期切换：吸顶，滚列表时始终能看见「今天是哪天」 -->
+		<view class="head" :class="{ stuck }">
 			<view class="nav" @click="shift(-1)">
 				<image class="ico-sm flip" src="/static/ui/chevron.png" mode="aspectFit" />
 			</view>
@@ -25,11 +25,13 @@
 				<view class="bar-fill" :class="{ over: isOver }" :style="{ width: pct + '%' }"></view>
 			</view>
 
-			<!-- 剩余热量：胶囊居中，弱化存在感 -->
+			<!-- 剩余热量：这句最重要，给足视觉重量 -->
 			<view class="pill-row">
 				<view class="pill" :class="{ over: isOver }">
-					<text v-if="!isOver">还可以吃 {{ remain }} kcal</text>
-					<text v-else>已超出 {{ -remain }} kcal</text>
+					<text v-if="!isOver" class="pill-t">还可以吃</text>
+					<text v-else class="pill-t">已超出</text>
+					<text class="pill-v num">{{ isOver ? -remain : remain }}</text>
+					<text class="pill-u">kcal</text>
 				</view>
 			</view>
 
@@ -37,7 +39,7 @@
 
 			<!-- 三大营养素：横向三列，省掉约一半垂直空间 -->
 			<view class="macros3">
-				<view class="m3" v-for="m in macroRows" :key="m.key">
+				<view class="m3" v-for="m in macroRows" :key="m.key" :class="{ over: m.over }">
 					<view class="m3-head">
 						<text class="m3-label">{{ m.label }}</text>
 						<text class="m3-val">{{ m.value }}<text class="m3-unit">g</text></text>
@@ -57,6 +59,12 @@
 			</view>
 		</view>
 
+		<!-- 一整天都没记录：给一句明确的话，别让用户对着四行空白发愣 -->
+		<view v-if="!records.length" class="day-blank">
+			<text class="db-t">{{ isToday ? '今天还没有记录' : '这一天还没有记录' }}</text>
+			<text class="db-s">拍一张照片，或点餐次右边的 + 手动添加</text>
+		</view>
+
 		<!-- 全日餐次：空餐次保留淡色占位，提醒用户补记 -->
 		<view class="list">
 			<view
@@ -66,11 +74,16 @@
 				:class="{ blank: !g.records.length, filled: g.records.length }"
 			>
 				<view class="meal-head">
+					<view class="meal-accent" :style="{ background: g.color }"></view>
 					<image class="meal-ico" :src="g.icon" mode="aspectFit" />
 					<text class="meal-name grow">{{ g.label }}</text>
 					<text v-if="g.records.length" class="meal-kcal">{{ round(g.totals.kcal, 0) }}</text>
 					<text v-if="g.records.length" class="meal-unit">kcal</text>
-					<view class="meal-add" @click="addRecord(g.key)">
+					<view
+						class="meal-add"
+						:style="{ background: withAlpha(g.color, 0.14) }"
+						@click="addRecord(g.key)"
+					>
 						<image class="ico-sm" src="/static/ui/plus.png" mode="aspectFit" />
 					</view>
 				</view>
@@ -130,7 +143,8 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { onShow, onHide } from '@dcloudio/uni-app'
+import { onHide, onPageScroll, onShow } from '@dcloudio/uni-app'
+import { withAlpha } from '../../core/color.js'
 import { MACRO_META, MEALS } from '../../core/constants.js'
 import { addDays, dateLabel, formatTime, parseKey, todayKey } from '../../core/date.js'
 import { getSettings, recordsByDate } from '../../core/db.js'
@@ -153,6 +167,13 @@ const settings = ref(getSettings())
 const fabOpen = ref(false)
 
 const isToday = computed(() => dateStr.value === todayKey())
+
+/**
+ * 吸顶栏「已吸住」的状态，用来加一条淡淡的投影。
+ * 只在布尔值翻转时写 ref —— onPageScroll 触发极频繁，
+ * 照着 scrollTop 存值会让整个列表跟着重渲染，滚动就毛了。
+ */
+const stuck = ref(false)
 
 const headLabel = computed(() => dateLabel(dateStr.value))
 
@@ -401,16 +422,33 @@ function fallbackToManual(title, content) {
 
 <style lang="scss" scoped>
 	.page {
-		/* 首页导航栏已隐藏（navigationStyle: custom），自行避开状态栏 */
+		/* 首页导航栏已隐藏（navigationStyle: custom）。
+		   避开状态栏的间距挪进了 .head：吸顶栏要盖住状态栏区域，
+		   否则滚起来内容会从它上面露出来。 */
 		padding: 0 $s-4 200rpx;
-		padding-top: var(--status-bar-height, 0px);
 	}
 
 	/* ---------- 日期切换 ---------- */
 	.head {
+		position: sticky;
+		/* H5 里状态栏高度是 0，真机上就是状态栏高度 */
+		top: 0;
+		z-index: 30;
 		display: flex;
 		align-items: center;
-		padding: $s-3 0 $s-4;
+		/* 必须有不透明底色，否则滚动时下面的记录会透上来 */
+		background: $c-bg;
+		padding: var(--status-bar-height, 0px) 0 $s-3;
+		/* 分隔靠 CSS 自己保证（一条极淡的线）。
+		   不指望 onPageScroll —— H5 上它不一定会触发，
+		   真机与浏览器表现不一致的东西，不做关键路径。 */
+		border-bottom: 1rpx solid $c-line;
+		transition: box-shadow 0.2s ease;
+	}
+
+	/* 吸住之后再叠一层淡淡的投影（拿得到滚动事件时才有，纯属加分） */
+	.head.stuck {
+		box-shadow: 0 8rpx 20rpx rgba(28, 39, 51, 0.05);
 	}
 
 	.nav {
@@ -508,17 +546,38 @@ function fallbackToManual(title, content) {
 		margin-top: $s-3;
 	}
 
+	/* 剩余热量：一句话给足重量，用数字撑起来 */
 	.pill {
+		display: flex;
+		align-items: baseline;
 		background: $c-primary-weak;
 		color: $c-primary-dark;
-		font-size: 22rpx;
-		padding: 8rpx 26rpx;
+		padding: 10rpx 30rpx;
 		border-radius: $r-pill;
+		border: 2rpx solid rgba(82, 169, 138, 0.22);
+	}
+
+	.pill-t {
+		font-size: 23rpx;
+		margin-right: 8rpx;
+	}
+
+	.pill-v {
+		font-size: 32rpx;
+		font-weight: 600;
+		line-height: 1.1;
+	}
+
+	.pill-u {
+		font-size: 20rpx;
+		margin-left: 4rpx;
+		opacity: 0.75;
 	}
 
 	.pill.over {
 		background: $c-danger-weak;
 		color: $c-danger;
+		border-color: rgba(201, 123, 110, 0.26);
 	}
 
 	.hr {
@@ -573,7 +632,7 @@ function fallbackToManual(title, content) {
 
 	.m3-track {
 		flex: 1;
-		height: 8rpx;
+		height: 12rpx;
 		border-radius: $r-pill;
 		background: $c-fill;
 		overflow: hidden;
@@ -585,9 +644,14 @@ function fallbackToManual(title, content) {
 		transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 	}
 
+	/* 超标那条：颜色不变（脂肪的黄不是告警色），靠底衬与图标示意 */
+	.m3.over .m3-track {
+		background: rgba(201, 123, 110, 0.16);
+	}
+
 	.m3-alert {
-		width: 22rpx;
-		height: 22rpx;
+		width: 26rpx;
+		height: 26rpx;
 		margin-left: 7rpx;
 		flex-shrink: 0;
 	}
@@ -611,9 +675,33 @@ function fallbackToManual(title, content) {
 		padding: 0 4rpx $s-2;
 	}
 
+	/* 空白天提示：轻，不抢戏（类名避开全局 .empty） */
+	.day-blank {
+		padding: $s-5 $s-4 $s-3;
+		text-align: center;
+	}
+
+	.db-t {
+		display: block;
+		font-size: 27rpx;
+		font-weight: 600;
+		color: $c-text-sub;
+	}
+
+	.db-s {
+		display: block;
+		font-size: 21rpx;
+		color: $c-text-mute;
+		margin-top: 6rpx;
+	}
+
 	/* 未记录的餐次：整体压淡，只留引导作用（类名避开全局 .empty） */
 	.meal-block.blank .meal-ico {
 		opacity: 0.32;
+	}
+
+	.meal-block.blank .meal-accent {
+		opacity: 0.35;
 	}
 
 	.meal-block.blank .meal-name {
@@ -626,8 +714,16 @@ function fallbackToManual(title, content) {
 	}
 
 	.meal-block.blank .meal-add {
-		background: rgba(255, 255, 255, 0.7);
 		box-shadow: none;
+	}
+
+	/* 餐次分段：一条餐次色竖线，比单纯加粗标题更容易扫读 */
+	.meal-accent {
+		width: 6rpx;
+		height: 26rpx;
+		border-radius: $r-pill;
+		margin-right: 12rpx;
+		flex-shrink: 0;
 	}
 
 	.meal-ico {
@@ -656,8 +752,8 @@ function fallbackToManual(title, content) {
 	}
 
 	.meal-add {
-		width: 48rpx;
-		height: 48rpx;
+		width: 52rpx;
+		height: 52rpx;
 		margin-left: $s-2;
 		display: flex;
 		align-items: center;
@@ -665,6 +761,11 @@ function fallbackToManual(title, content) {
 		border-radius: $r-pill;
 		background: $c-card;
 		box-shadow: $sh-1;
+		transition: transform 0.15s;
+	}
+
+	.meal-add:active {
+		transform: scale(0.92);
 	}
 
 	.meal-add:active {
@@ -829,7 +930,7 @@ function fallbackToManual(title, content) {
 		height: 108rpx;
 		border-radius: $r-pill;
 		background: linear-gradient(135deg, #79bda6, #4f9e82);
-		box-shadow: 0 3rpx 8rpx rgba(28, 39, 51, 0.07), 0 14rpx 32rpx rgba(79, 158, 130, 0.24);
+		box-shadow: 0 2rpx 6rpx rgba(28, 39, 51, 0.06), 0 18rpx 40rpx rgba(79, 158, 130, 0.3);
 		display: flex;
 		align-items: center;
 		justify-content: center;

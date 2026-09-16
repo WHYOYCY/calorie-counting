@@ -1898,6 +1898,33 @@ await withPlusIO({}, async () => {
 	eq(targets[0].visible, false, '私有目录标记为不可见（界面上会提示用分享）')
 })
 
+group('color.js · 从数据色算出胶囊配色')
+
+{
+	const C = await import('../src/core/color.js')
+	eq(C.parseHex('#52a98a'), { r: 82, g: 169, b: 138 }, '解析六位十六进制')
+	eq(C.parseHex('#5a8'), { r: 85, g: 170, b: 136 }, '解析三位缩写')
+	eq(C.parseHex('52a98a'), { r: 82, g: 169, b: 138 }, '没有 # 也认')
+	eq(C.parseHex('nope'), null, '非法值返回 null 而不是乱算')
+	eq(C.parseHex(''), null, '空值返回 null')
+
+	eq(C.withAlpha('#8fb0e0', 0.16), 'rgba(143, 176, 224, 0.16)', '半透明版用 rgba（8 位十六进制在老 WebView 上会被丢掉）')
+	eq(C.withAlpha('#8fb0e0', 2), 'rgba(143, 176, 224, 1)', 'alpha 超过 1 会被夹住')
+	eq(C.withAlpha('#8fb0e0', -1), 'rgba(143, 176, 224, 0)', 'alpha 小于 0 会被夹住')
+	eq(C.withAlpha('not-a-color', 0.5), 'not-a-color', '解析不了就把原值还回去，不至于画出透明块')
+	eq(C.withAlpha('bad', 0.5), 'rgba(187, 170, 221, 0.5)', '「bad」其实是个合法的三位色（bbaadd），别当成错误')
+
+	const d = C.darken('#8fb0e0')
+	ok(/^#[0-9a-f]{6}$/.test(d), `压暗返回合法颜色：${d}`)
+	const dd = C.parseHex(d)
+	ok(dd.r < 143 && dd.g < 176 && dd.b < 224, '压暗后三个通道都变小了')
+
+	// 三种营养素颜色压暗后，两两之间仍然能区分（否则胶囊看起来一个样）
+	const deep = ['#8fb0e0', '#e8cb8a', '#b5a6e0'].map((c) => C.darken(c, 0.42))
+	eq(new Set(deep).size, 3, '三种营养素压暗后仍然是三个不同的颜色')
+	eq(new Set(['#8fb0e0', '#e8cb8a', '#b5a6e0'].map((c) => C.withAlpha(c, 0.16))).size, 3, '三种底色也各不相同')
+}
+
 group('selftest.js · 自检要能报出真话')
 
 // Node / H5 环境：应老实报「非 Android」，而不是崩
