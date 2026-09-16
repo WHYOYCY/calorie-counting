@@ -5,8 +5,6 @@
  */
 import { todayKey } from './date.js'
 import { hasStorage, readRaw, writeRaw, removeRaw } from './storage.js'
-import { base64ToBytes } from './base64.js'
-import { utf8Bytes, utf8Decode } from './utf8.js'
 import {
 	_resetOutDirs,
 	absOf,
@@ -24,7 +22,6 @@ import {
 } from './plusio.js'
 
 export { _resetOutDirs }
-import { parseFullBackupText } from './fullbackup.js'
 
 export function backupFileName() {
 	return `calorie-backup-${todayKey()}.json`
@@ -281,183 +278,10 @@ export function writeBackupFile(json, filename = backupFileName()) {
 
 /** 复制到剪贴板（各端通用兜底） - 已上移到剪贴板一节 */
 
-/* ---------------- 完整备份（含照片）的落盘与选取 ---------------- */
-
-/**
- * 完整备份的内存上限。
- * 备份会先在内存里组装成 Uint8Array（几百 MB 会把手机搞崩），
- * 所以超过就明确拒绝，让用户先清理照片。
+/*
+ * 「完整备份（含照片）」相关的读写已随该功能一起移除（见 README「待优化」）。
+ * 现在只有记录 + 设置的 JSON 备份：writeBackupFile / shareText / copyText /
+ * readClipboard，以及本机快照（saveSnapshot / listSnapshots / readSnapshot /
+ * latestSnapshot / clearSnapshots）。
+ * 照片仍然存在本机、在记录详情里正常显示，只是不跟着备份走。
  */
-export const FULL_BACKUP_MAX_BYTES = 120 * 1024 * 1024
-
-/**
- * 导出完整备份（App 端）。
- *
- * 重做原因：真机自检证明 **Native.js 的写入全部失败**（writeBytes、
- * writeString、Files.copy、MediaStore 输出流都是「不报错但 0 字节」），
- * 唯一能真正写进去的是 plus.io 的 FileWriter.write(String)。
- *
- * 所以整条链只用 plus.io + plus.zip，**JS 生成的字节一次都不过桥**：
- *   1. 建临时目录，把 backup.json（文本）用 plus.io 写进去
- *   2. 照片用 entry.copyTo 原生拷进同一目录（字节不过 JS）
- *   3. plus.zip.compress 打成一个 zip（纯原生）
- *   4. 输出目录优先挑「用户在文件管理器里看得到」的那个
- *
- * @param {object} plan  { jsonText, photos:[{from, name}] }  由调用方准备
- */
-/**
- * 把完整备份文本写到用户能找到的地方。
- *
- * App：plus.io 写文本（自检证明这台设备上唯一真的能写进去的路径），
- *      逐个候选目录试，写完核对字节数。
- * H5：浏览器下载一个 .json。
- *
- * @returns {Promise<{ok:boolean, where?:string, absPath?:string, userVisible?:boolean,
- *                    bytes?:number, dirLabel?:string, error?:string}>}
- */
-export async function exportFullBackupText(text, filename = backupFileName()) {
-	const body = String(text || '')
-	if (!body) return { ok: false, error: '没有可导出的内容' }
-
-	// H5：直接下载
-	if (typeof document !== 'undefined' && typeof Blob !== 'undefined') {
-		try {
-			const blob = new Blob([body], { type: 'application/json' })
-			const url = URL.createObjectURL(blob)
-			const a = document.createElement('a')
-			a.href = url
-			a.download = filename
-			document.body.appendChild(a)
-			a.click()
-			document.body.removeChild(a)
-			setTimeout(() => URL.revokeObjectURL(url), 4000)
-			return { ok: true, where: filename, bytes: body.length, userVisible: true, dirLabel: '浏览器下载' }
-		} catch (e) {
-			return { ok: false, error: '浏览器下载失败：' + String((e && e.message) || e) }
-		}
-	}
-
-	if (!hasPlusIo()) return { ok: false, error: '当前环境不支持导出文件' }
-
-	const dirs = await exportTargets()
-	const tried = []
-	for (const d of dirs) {
-		const triedOne = d.public
-			? await writeTextAtChecked(d.abs, filename, body)
-			: await writeTextChecked(`${d.url}/${filename}`, body)
-		if (!triedOne.ok) {
-			tried.push(`${d.label}：${triedOne.error}`)
-			continue
-		}
-		return {
-			ok: true,
-			where: triedOne.abs || `${d.url}/${filename}`,
-			absPath: triedOne.abs || absOf(`${d.url}/${filename}`),
-			userVisible: !!d.visible,
-			bytes: triedOne.bytes,
-			dirLabel: d.label,
-		}
-	}
-	return { ok: false, error: '每个目录都写不进去：' + tried.join('；') }
-}
-
-/**
- * 扫描候选目录里已有的完整备份文件（新的在前）。
- * 导入时列给用户选 —— 不用系统文件选择器：真机上 SAF 选来的
- * content:// 路径读不出来。
- */
-export async function listBackupFiles() {
-	if (!hasPlusIo()) return { ok: true, files: [] }
-	const out = []
-	const seen = new Set()
-	for (const d of await exportTargets()) {
-		const found = await findBackups(d.url, 'calorie-backup')
-		for (const f of found) {
-			if (seen.has(f.name)) continue
-			seen.add(f.name)
-			const size = await fileSize(f.url)
-			out.push({ ...f, size, dir: d.label, visible: d.visible })
-		}
-	}
-	// 私有目录根也扫一遍（早期版本可能把备份放在那儿）
-	const priv = await findBackups('_doc', 'calorie-backup')
-	for (const f of priv) {
-		if (seen.has(f.name)) continue
-		seen.add(f.name)
-		const size = await fileSize(f.url)
-		out.push({ ...f, size, dir: '应用私有目录', visible: false })
-	}
-	// ★ 手机公共的下载/文档目录：从微信、网盘下载的备份，或者用数据线
-	//   拷进手机的文件都在那儿（应用私有的 _downloads 里是没有的）。
-	//   换手机时文件正是从这儿进来的。
-	for (const d of await publicDirCandidates()) {
-		for (const f of await findBackupsAt(d.abs, 'calorie-backup')) {
-			if (seen.has(f.name)) continue
-			seen.add(f.name)
-			const size = await fileSizeAt(f.url)
-			out.push({ ...f, size, dir: d.label, visible: true, public: true })
-		}
-	}
-	out.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
-	return { ok: true, files: out }
-}
-
-/**
- * 读一个备份文件 → 解析成 payload。
- * 只读文本：自检证明 plus.io 读文本是通的，读二进制不是。
- */
-export async function loadBackupFromFile(fileUrl) {
-	const r = await readText(fileUrl)
-	if (!r.ok) return { ok: false, error: '读取备份失败：' + r.error }
-	const text = String(r.text || '').trim()
-	if (!text) return { ok: false, error: '备份文件是空的（可能是 0 字节）' }
-	const parsed = parseFullBackupText(text)
-	if (!parsed.ok) return parsed
-	return { ok: true, payload: parsed.payload, bytes: text.length }
-}
-
-/* ---------------- H5：从 <input type=file> 读 ---------------- */
-
-/** H5 下让用户选一个备份文件并读出文本 */
-export function pickBackupText() {
-	return new Promise((resolve) => {
-		if (typeof document === 'undefined') {
-			resolve({ ok: false, error: '当前环境不支持文件选择' })
-			return
-		}
-		const input = document.createElement('input')
-		input.type = 'file'
-		input.accept = '.json,application/json'
-		input.style.position = 'fixed'
-		input.style.left = '-9999px'
-		document.body.appendChild(input)
-		let done = false
-		const finish = (v) => {
-			if (done) return
-			done = true
-			try {
-				document.body.removeChild(input)
-			} catch (e) {
-				/* 已经移除 */
-			}
-			resolve(v)
-		}
-		input.onchange = () => {
-			const f = input.files && input.files[0]
-			if (!f) {
-				finish({ ok: false, cancelled: true, error: '' })
-				return
-			}
-			const fr = new FileReader()
-			fr.onload = () => finish({ ok: true, text: String(fr.result || ''), name: f.name })
-			fr.onerror = () => finish({ ok: false, error: '读取所选文件失败' })
-			fr.readAsText(f)
-		}
-		window.addEventListener(
-			'focus',
-			() => setTimeout(() => finish({ ok: false, cancelled: true, error: '' }), 800),
-			{ once: true }
-		)
-		input.click()
-	})
-}

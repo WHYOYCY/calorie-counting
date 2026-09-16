@@ -144,21 +144,16 @@
 				只含记录与设置，体积很小。照片不在这里面。
 			</text>
 
-			<!-- 完整备份：把照片也装进去，换手机就靠它 -->
-			<view class="sub-head">
-				<text class="sub-title">完整备份（含照片）</text>
-			</view>
+			<!--
+				照片导出（把照片一起打包）已经下掉，只留记录 + 设置的 JSON。
+				原因与后续计划见 README「待优化」一节：
+				这台设备上能可靠写文件的只有 plus.io 的文本写入，把大体积图片
+				一起塞进备份会让整条链路的失败面变大；先把「记录不丢」做扎实，
+				照片导出之后单独重新设计。
+			-->
 			<text class="hint t-xs t-mute">
-				把设置、记录和所有照片装进一个备份文件。换手机时在新手机上用「从文件恢复」导入它，
-				照片就一起过去了。这个目录在部分手机上文件管理器看不到，那就用「分享刚导出的备份」发出去。
+				照片仍保存在本机、在记录里正常显示，只是暂时不跟着备份走。
 			</text>
-			<view class="row-btns">
-				<view class="btn btn-ghost grow" @click="doFullBackup">导出完整备份</view>
-				<view class="btn btn-ghost grow" @click="doFullRestore">从文件恢复</view>
-			</view>
-			<view v-if="lastBackup" class="row-btns mt-2">
-				<view class="btn btn-ghost grow" @click="shareLastBackup">分享刚导出的备份</view>
-			</view>
 
 			<!-- 本机自动备份：清空与覆盖导入都是不可逆的，得留后悔药 -->
 			<view class="sub-head between">
@@ -205,26 +200,6 @@
 			</text>
 			<!-- 原生能力自检：真机上 Native.js 有些操作会静默失效，让设备自己报 -->
 			<view class="btn btn-plain self-test-btn" @click="doSelfTest">原生能力自检</view>
-		</view>
-	</view>
-
-	<!-- 选择备份文件弹层 -->
-	<view v-if="restorePick" class="mask" @click="restorePick = false">
-		<view class="dialog" @click.stop>
-			<text class="dialog-title">选择备份文件</text>
-			<text class="hint t-xs t-mute">在这些位置找到了备份，点一个恢复：</text>
-			<scroll-view class="report" scroll-y>
-				<view v-for="f in restoreList" :key="f.url" class="snap-item" @click="pickRestoreFile(f)">
-					<view class="grow">
-						<text class="t-sm">{{ f.name }}</text>
-						<text class="t-xs t-mute snap-meta">{{ f.dirLabel }} · {{ humanSize(f.size) }}</text>
-					</view>
-					<view class="mini-btn on">恢复</view>
-				</view>
-			</scroll-view>
-			<view class="row-btns">
-				<view class="btn btn-plain grow" @click="restorePick = false">取消</view>
-			</view>
 		</view>
 	</view>
 
@@ -288,21 +263,6 @@ import {
 	SNAPSHOT_KEEP,
 } from '../../core/backup.js'
 import { probe, saveToDownloads } from '../../core/native-fs.js'
-import {
-	exportFullBackupText,
-	listBackupFiles,
-	loadBackupFromFile,
-	pickBackupText,
-	shareFile,
-} from '../../core/backup.js'
-import {
-	applyRestoredBackup,
-	buildFullBackupJson,
-	fullBackupFileName,
-	humanSize,
-	summarizePayload,
-} from '../../core/fullbackup-io.js'
-import { parseFullBackupText } from '../../core/fullbackup.js'
 import { runSelfTest } from '../../core/selftest.js'
 import { testConnection } from '../../core/ai.js'
 
@@ -650,188 +610,15 @@ async function copyReport() {
 	uni.showToast({ title: r.ok ? '已复制' : '复制失败', icon: 'none' })
 }
 
-/* ---------------- 完整备份（含照片） ---------------- */
-
-const fullBusy = ref(false)
-const restorePick = ref(false)
-const restoreList = ref([])
-/** 最近一次导出的备份文件（用于「分享备份文件」） */
-const lastBackup = ref(null)
-/** 换行常量：模板字符串里写 \\n 容易被工具链弄坏，统一用这个 */
-const NL = String.fromCharCode(10)
-
-/**
- * 导出完整备份。
- *
- * 产出**一个普通的 JSON 文本文件**：记录 + 每张照片的 base64。
- * 真机自检证明这台设备上只有 plus.io 的文本写入能真正写进去，
- * 所以不再用 zip / copyTo / Native.js —— 那条链上没有任何一步
- * 是「写完不知道成没成」的。
+/* ---------------- 照片导出：暂时下掉 ---------------- */
+/*
+ * 这里原本是「完整备份（含照片）」：把记录与所有照片装进一个备份文件。
+ * 已经移除，原因是这条链路的失败面太大 ——
+ * 真机上能可靠写文件的只有 plus.io 的文本写入，一旦把几十 MB 的
+ * base64 图片一起塞进去，写入大小核对、内存、超时都会成为新的坑。
+ * 先把「记录一定不丢」做扎实，照片导出之后单独重新设计（见 README「待优化」）。
+ * 照片本身仍然存在本机、在记录详情里正常显示，只是不跟着备份走。
  */
-async function doFullBackup() {
-	if (fullBusy.value) return
-	fullBusy.value = true
-	uni.showLoading({ title: '整理照片中…', mask: true })
-
-	const built = await buildFullBackupJson()
-	if (!built.ok) {
-		uni.hideLoading()
-		fullBusy.value = false
-		uni.showModal({ title: '没法导出', content: built.error || '未知错误', showCancel: false })
-		return
-	}
-
-	const res = await exportFullBackupText(built.text, fullBackupFileName())
-	lastBackup.value = res.ok ? { absPath: res.absPath || '', name: fullBackupFileName(), visible: !!res.userVisible } : null
-	uni.hideLoading()
-	fullBusy.value = false
-
-	if (!res.ok) {
-		uni.showModal({
-			title: '导出失败',
-			content: `${res.error || '未知错误'}${NL}${NL}可以点「原生能力自检」看看哪条路不通。`,
-			showCancel: false,
-		})
-		return
-	}
-
-	const detail = [
-		`${built.stats.records} 条记录，${built.stats.photos} 张照片`,
-		humanSize(res.bytes),
-	]
-	if (built.stats.dropped) {
-		detail.push(`有 ${built.stats.dropped} 张照片文件已经不在了，这 ${built.stats.dropped} 条记录的图片会是空的`)
-	}
-
-	if (res.userVisible) {
-		uni.showModal({
-			title: '完整备份已导出',
-			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath || res.where || '浏览器下载'}${NL}（${res.dirLabel}）${NL}${NL}换手机时把这个文件拷过去，在新手机上用「从文件恢复」。`,
-			showCancel: false,
-		})
-	} else {
-		// 私有目录（Android/data/... 下的）：文件管理器看不到，
-		// 所以直接给一个「分享」按钮把它发出去，别让用户对着一个拿不到的文件干瞪眼
-		uni.showModal({
-			title: '已导出',
-			content: `${detail.join(NL)}${NL}${NL}这个位置（${res.dirLabel}）在 Android 11+ 上文件管理器看不到。现在分享出去，存到微信或网盘，换手机时再导回来。`,
-			confirmText: '分享文件',
-			cancelText: '知道了',
-			success: (r) => {
-				if (r.confirm) shareLastBackup()
-			},
-		})
-	}
-}
-
-/** 把最近导出的备份文件分享出去 */
-async function shareLastBackup() {
-	const b = lastBackup.value
-	if (!b || !b.absPath) {
-		uni.showToast({ title: '请先导出一次', icon: 'none' })
-		return
-	}
-	const res = await shareFile(b.absPath, b.name)
-	if (res.ok) return
-	uni.showModal({
-		title: '分享没能打开',
-		content: `${res.error || '未知错误'}${NL}${NL}也可以点「原生能力自检」报告里的「手机公共目录」那条看看能不能换个位置导出。`,
-		showCancel: false,
-	})
-}
-
-/** 确认后恢复（App 与 H5 共用） */
-async function confirmAndRestore(payload, name) {
-	const sum = summarizePayload(payload)
-	uni.showModal({
-		title: '用这个备份覆盖当前数据？',
-		content: `${name ? name + NL : ''}备份里：${sum.records} 条记录，${sum.photos} 张照片。${NL}${NL}当前数据会先自动在本机存一份，可以再退回来。`,
-		confirmText: '恢复',
-		success: async (r) => {
-			if (!r.confirm) return
-			uni.showLoading({ title: '恢复中…', mask: true })
-			const applied = await applyRestoredBackup(payload)
-			uni.hideLoading()
-			refresh()
-			if (!applied.ok) {
-				uni.showModal({ title: '恢复失败', content: applied.error || '未知错误', showCancel: false })
-				return
-			}
-			const parts = [`${applied.records} 条记录`, `${applied.photos} 张照片`]
-			if (applied.missing && applied.missing.length) {
-				parts.push(`${applied.missing.length} 张照片备份里就没有（对应记录的图片为空）`)
-			}
-			if (applied.failed && applied.failed.length) {
-				parts.push(`${applied.failed.length} 张照片写回失败`)
-			}
-			uni.showModal({ title: '已恢复', content: parts.join('，') + '。', showCancel: false })
-		},
-	})
-}
-
-/** 从备份文件恢复 */
-async function doFullRestore() {
-	if (fullBusy.value) return
-
-	// H5：浏览器文件选择器
-	if (typeof document !== 'undefined') {
-		const picked = await pickBackupText()
-		if (!picked.ok) {
-			if (picked.cancelled) return
-			uni.showModal({ title: '没能读取所选文件', content: picked.error || '未知错误', showCancel: false })
-			return
-		}
-		const parsed = parseFullBackupText(picked.text)
-		if (!parsed.ok) {
-			uni.showModal({ title: '这不是有效的完整备份', content: parsed.error, showCancel: false })
-			return
-		}
-		await confirmAndRestore(parsed.payload, picked.name)
-		return
-	}
-
-	// App：扫描「下载 / 文档」目录找备份 —— SAF 选来的 content://
-	// 在真机上读不出来（plus.io 读不了 content://，Native.js 读取也失效）
-	fullBusy.value = true
-	uni.showLoading({ title: '查找备份…', mask: true })
-	const found = await listBackupFiles()
-	uni.hideLoading()
-	fullBusy.value = false
-
-	const list = (found && found.files) || []
-	if (!list.length) {
-		uni.showModal({
-			title: '没找到备份文件',
-			content:
-				'把之前导出的备份（文件名以 calorie-backup 开头的 .json）放到手机的「下载」目录，再点一次「从文件恢复」。' +
-				NL +
-				'如果你是从别的手机拷过来的，请先确认文件确实拷进去了。',
-			showCancel: false,
-		})
-		return
-	}
-
-	restoreList.value = list
-	restorePick.value = true
-}
-
-/** 用户选中某个备份文件 */
-async function pickRestoreFile(f) {
-	restorePick.value = false
-	if (fullBusy.value) return
-	fullBusy.value = true
-	uni.showLoading({ title: '读取备份…', mask: true })
-
-	const loaded = await loadBackupFromFile(f.url)
-	uni.hideLoading()
-	fullBusy.value = false
-
-	if (!loaded.ok) {
-		uni.showModal({ title: '读取备份失败', content: loaded.error || '未知错误', showCancel: false })
-		return
-	}
-	await confirmAndRestore(loaded.payload, f.name)
-}
 
 /* ---------------- 本机自动备份 ---------------- */
 

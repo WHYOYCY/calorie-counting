@@ -142,12 +142,9 @@ function utf8Len(str) {
 		} else n += 3
 	}
 	return n
-}/* ---------------- 完整备份：读写文件 ---------------- */
+}
 
-import { bytesToBase64 } from './base64.js'
 import * as plusio from './plusio.js'
-
-/** ISO-8859-1 字符串 → 字节（每个码点低 8 位就是一个字节） */
 
 /* ---------------- 下面这些是给「原生能力自检」用的底层工具 ---------------- */
 /*
@@ -155,10 +152,10 @@ import * as plusio from './plusio.js'
  * （writeBytesToDownloads / writeFileBytes / readTextFileNative /
  *   pickFileBytes / MediaStore 输出流 …）。
  * 真机自检证明那整套在这台设备上**写入全部无效**（不报错但 0 字节），
- * 所以备份链路改走 plus.io + plus.zip（见 plusio.js），
+ * 所以备份链路改走 plus.io 的文本写入（见 plusio.js），
  * 那些实现已整体删除 —— 留着不工作的代码只会误导后来的人。
  *
- * 保留的只有：环境探测、Native.js 的两个调用工具、以及文本导出的 plus.io 实现。
+ * 保留的只有：环境探测、Native.js 的两个调用工具、以及「存到下载目录」的 plus.io 实现。
  * 自检里仍然会探一下那几条 Native.js 路径，用于判断别的机型能不能用。
  */
 
