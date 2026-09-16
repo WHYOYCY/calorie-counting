@@ -136,7 +136,7 @@ export function hasPlus() {
 }
 
 /** 本地 URL（_doc/x）→ 平台绝对路径 */
-function absPathOf(localUrl) {
+export function absPathOf(localUrl) {
 	if (!hasPlus() || !plus.io || typeof plus.io.convertLocalFileSystemURL !== 'function') {
 		return ''
 	}
@@ -158,6 +158,39 @@ function bytesToLatin1(bytes) {
 		s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CH, bytes.length)))
 	}
 	return s
+}
+
+/**
+ * 绝对路径 → java.nio.file.Path。
+ * 不用 Paths.get（那是可变参数，过桥不可靠），走 File.toPath() 更稳。
+ */
+function pathOf(absPath) {
+	const File = plus.android.importClass('java.io.File')
+	if (!File) throw new Error('importClass 返回空（java.io.File）')
+	return callJava(new File(absPath), 'toPath')
+}
+
+function filesClass() {
+	const Files = plus.android.importClass('java.nio.file.Files')
+	if (!Files) throw new Error('importClass 返回空（java.nio.file，需 API 26+）')
+	return Files
+}
+
+/**
+ * 原生侧把 InputStream 落到本地文件（Files.copy(InputStream, Path)）。
+ *
+ * 为什么不让字节过 JS 桥：真机上 readAllBytes() 拿到的 byte[] 再传给
+ * 另一个 Java 方法（encodeToString）**内容就丢了** —— 这正是 DCloud
+ * #220280、#107510 记的「invoke 传 byte[] 参数不可靠」。
+ * java.nio.file.Files.copy 全程在 Java 侧完成，字节根本不经过我们。
+ */
+function copyStreamToFile(input, absPath) {
+	callJava(filesClass(), 'copy', input, pathOf(absPath))
+}
+
+/** 原生侧把本地文件写进一个 OutputStream（Files.copy(Path, OutputStream)） */
+function copyFileToStream(absPath, os) {
+	callJava(filesClass(), 'copy', pathOf(absPath), os)
 }
 
 /**
@@ -520,10 +553,114 @@ function querySize(resolver, uri) {
  * 而 android.os.FileUtils 本来就是 AOSP 的隐藏 API，
  * Android 9+ 对非 SDK 接口有反射限制。所以整条中转去掉。
  */
-export async function writeBytesToDownloads(bytes, filename) {
-	return writeBytesToMediaStore([bytes], filename, 'application/zip')
-}
 /**
+ * 插入 MediaStore 记录并打开输出流（三种写入策略共用这段）。
+ * @returns {{resolver:object, uri:object, os:object}}
+ */
+function openMediaStoreTarget(filename, mime, sub) {
+	plus.android.importClass('android.content.ContentResolver')
+	plus.android.importClass('java.io.OutputStream')
+	const Downloads = plus.android.importClass('android.provider.MediaStore$Downloads')
+	const ContentValues = plus.android.importClass('android.content.ContentValues')
+	if (!Downloads || !ContentValues) {
+		throw new Error('importClass 返回空（该基座可能没链入 MediaStore）')
+	}
+	const values = new ContentValues()
+	callJava(values, 'put', staticField(Downloads, 'DISPLAY_NAME'), filename)
+	callJava(values, 'put', staticField(Downloads, 'MIME_TYPE'), mime)
+	callJava(values, 'put', staticField(Downloads, 'RELATIVE_PATH'), sub)
+
+	const main = plus.android.runtimeMainActivity()
+	const resolver = callJava(main, 'getContentResolver')
+	if (!resolver) throw new Error('getContentResolver 返回空')
+
+	let uri = null
+	try {
+		uri = callJava(resolver, 'insert', staticField(Downloads, 'EXTERNAL_CONTENT_URI'), values)
+		if (!uri) throw new Error('系统拒绝创建文件（MediaStore 没返回 uri）')
+		const os = callJava(resolver, 'openOutputStream', uri)
+		if (!os) throw new Error('无法打开输出流')
+		return { resolver, uri, os }
+	} catch (e) {
+		// 已经 insert 出来的空行必须删掉，否则下载目录里会留一堆 0 字节垃圾
+		try {
+			if (uri) callJava(resolver, 'delete', uri, null, null)
+		} catch (e2) {
+			/* 清理失败就算了 */
+		}
+		throw e
+	}
+}
+
+/**
+ * 策略 A：先把字节落成私有文件，再让原生 Files.copy(Path, OutputStream)
+ * 推进 MediaStore。
+ *
+ * 好处有两个：
+ *   1. 写的是普通 FileOutputStream，不是 MediaStore 的输出流
+ *   2. 从私有文件到下载目录这一段全程在 Java 侧，字节不过我们的桥
+ */
+async function copyPrivateFileToDownloads(absPath, filename, mime, expected) {
+	const tr = ['privateFile']
+	const sub = mime && mime.indexOf('image/') === 0 ? 'Pictures' : 'Download'
+	let resolver = null
+	let uri = null
+	try {
+		tr.push('insert')
+		const t = openMediaStoreTarget(filename, mime, sub)
+		resolver = t.resolver
+		uri = t.uri
+
+		tr.push('nativeCopy')
+		copyFileToStream(absPath, t.os)
+
+		tr.push('verify')
+		const got = measureWritten(resolver, uri, expected)
+		if (got === -1) {
+			return { ok: false, error: '无法核对写入结果（查不到大小）', kept: true, trace: tr.join(' → ') }
+		}
+		if (got !== expected) {
+			throw new Error(`写了 ${expected} 字节，实际只有 ${got} 字节`)
+		}
+
+		tr.push('ok')
+		return { ok: true, where: `${sub}/${filename}`, bytes: expected, method: 'private-file', trace: tr.join(' → ') }
+	} catch (e) {
+		try {
+			if (uri && resolver) callJava(resolver, 'delete', uri, null, null)
+		} catch (e2) {
+			/* 清理失败就算了 */
+		}
+		return { ok: false, error: String((e && e.message) || e), trace: tr.join(' → ') }
+	}
+}
+
+export async function writeBytesToDownloads(bytes, filename) {
+	// 策略 A：先落私有文件，再让原生 Files.copy 推进下载目录
+	const localUrl = `_doc/out-${Date.now()}.zip`
+	const abs = absPathOf(localUrl)
+	const wrote = await writeFileBytes(abs, [bytes])
+	if (wrote.ok) {
+		const copied = await copyPrivateFileToDownloads(abs, filename, 'application/zip', bytes.length)
+		removePrivateFile(localUrl)
+		if (copied.ok) return copied
+		// 无法核对时文件是故意保留的，把这点带到外层
+		if (copied.kept) {
+			return { ok: false, error: `策略A: ${copied.error}（文件已保留，请到下载目录看一眼）`, trace: copied.trace }
+		}
+		// 策略 A 失败就继续往下试策略 B
+		const fallback = await writeBytesToMediaStore([bytes], filename, 'application/zip')
+		if (fallback.ok) return fallback
+		return {
+			ok: false,
+			error: `策略A: ${copied.error}  ｜  策略B: ${fallback.error}`,
+			trace: '',
+		}
+	}
+
+	// 私有文件都没写成功，只能直接往 MediaStore 的输出流写
+	return writeBytesToMediaStore([bytes], filename, 'application/zip')
+}/**
  * 读一个 content:// uri（SAF 选来的文件）→ base64。
  *
  * 全程原生：openInputStream → readAllBytes → Base64.encodeToString。
@@ -537,12 +674,9 @@ export async function readUriBase64(uri, opts = {}) {
 	if (!isAndroid()) {
 		return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
 	}
-	const limit = Number(opts.limit) || 0
 	try {
 		trace.push('importClass')
 		plus.android.importClass('java.io.InputStream')
-		const Base64 = plus.android.importClass('android.util.Base64')
-		if (!Base64) throw new Error('importClass 返回空（基座可能没链入 android.util）')
 
 		trace.push('getContentResolver')
 		const main = plus.android.runtimeMainActivity()
@@ -553,8 +687,8 @@ export async function readUriBase64(uri, opts = {}) {
 		const input = callJava(resolver, 'openInputStream', uri)
 		if (!input) throw new Error('无法打开输入流')
 
-		// 先问一下大小：读进来会 base64 膨胀 33%，太大就别读了
-		if (limit) {
+		// 先问大小，太大就别搬了
+		if (opts.limit) {
 			trace.push('available')
 			let size = 0
 			try {
@@ -562,23 +696,47 @@ export async function readUriBase64(uri, opts = {}) {
 			} catch (e) {
 				size = 0
 			}
-			if (size > limit) {
+			if (size > opts.limit) {
 				callJava(input, 'close')
-				return { ok: false, error: '这个备份文件太大了，当前版本不支持', trace: trace.join(' → ') }
+				return {
+					ok: false,
+					error: '这个备份文件太大了，当前版本不支持',
+					trace: trace.join(' → '),
+				}
 			}
 		}
 
-		trace.push('readAllBytes')
-		const bytes = callJava(input, 'readAllBytes')
+		// 关键改动：不在 JS 里接 byte[]（那样内容会丢），
+		// 而是让原生把流落成私有文件，再用 plus.io 读 ——
+		// 后者正是照片识别一直在用的读法，是验证过的。
+		if (!opts.onPickedFile) {
+			callJava(input, 'close')
+			return { ok: false, error: '内部错误：缺少落盘回调', trace: trace.join(' → ') }
+		}
+		const staged = opts.onPickedFile()
+		trace.push('nativeCopy')
+		copyStreamToFile(input, staged.absPath)
 		callJava(input, 'close')
-		if (!bytes) throw new Error('readAllBytes 返回空')
 
-		trace.push('encodeToString')
-		const b64 = callJava(Base64, 'encodeToString', bytes, staticField(Base64, 'NO_WRAP'))
-		if (!b64) throw new Error('读到的内容是空的（文件可能是 0 字节）')
+		trace.push('readViaPlus')
+		const b64 = await staged.read()
+		if (!b64 || !b64.ok) {
+			return {
+				ok: false,
+				error: b64 && b64.error ? b64.error : '读取落盘后的文件失败',
+				trace: trace.join(' → '),
+			}
+		}
+		if (!b64.base64) {
+			return {
+				ok: false,
+				error: '读到的内容是空的（文件可能是 0 字节）',
+				trace: trace.join(' → '),
+			}
+		}
 
 		trace.push('ok')
-		return { ok: true, base64: String(b64), trace: trace.join(' → ') }
+		return { ok: true, base64: b64.base64, trace: trace.join(' → ') }
 	} catch (e) {
 		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
 	}
@@ -647,8 +805,11 @@ export function pickFileBytes(opts = {}) {
 					}
 					const uri = callJava(data, 'getData')
 					if (!uri) throw new Error('没有拿到文件 uri')
-					// 直接读成 base64，不再落临时文件
-					readUriBase64(uri, { limit: opts.limit }).then((r) => {
+					// 在原生侧落成私有文件，再由调用方用 plus.io 读
+					readUriBase64(uri, {
+						limit: opts.limit,
+						onPickedFile: opts.onPickedFile,
+					}).then((r) => {
 						if (r.ok) done({ ok: true, base64: r.base64 })
 						else done({ ok: false, error: r.error, inner: r.trace })
 					})

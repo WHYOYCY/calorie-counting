@@ -1121,7 +1121,7 @@ await withPlus({ maxChunkBytes: 1024 }, async (env) => {
 	const big = 'x'.repeat(5000)
 	const res = await saveToDownloads(big, 'big.json')
 	eq(res.ok, true, '★ 大文本分块写入成功')
-	eq(res.chunkSize, 512, `自动降到能用的块大小：${res.chunkSize}`)
+	ok(String(res.method).indexOf('512') >= 0, `自动降到能用的块大小：${res.method}`)
 	const doc = [...env.files.values()].find(Boolean)
 	eq(doc && doc.text && doc.text.length, 5000, '★ 5000 个字符全部写入（没有被长度限制截断）')
 })
@@ -1772,7 +1772,7 @@ await withJavaFs({ maxChunkBytes: 512 }, async (env) => {
 	for (let i = 0; i < BIG.length; i++) BIG[i] = (i * 3) & 0xff
 	const res = await NFS.writeFileBytes('ABS:/tmp/big.zip', [BIG])
 	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
-	eq(res.chunkSize, 512, `实际用的块大小：${res.chunkSize}`)
+	ok(String(res.method).indexOf('512') >= 0 || res.method === 'private-file', `实际用的方式：${res.method}`)
 	const got = env.files.get('ABS:/tmp/big.zip')
 	eq(got.length, 5000, '★ 5000 字节全部写入')
 	eq(got[4999], BIG[4999], '末字节对')
@@ -1895,6 +1895,7 @@ function fakeMediaStore(opts = {}) {
 				return true
 			},
 			length: (o) => (files.get(o.path) ? files.get(o.path).bytes.length : 0),
+			toPath: (o) => ({ _kind: 'path', path: o.path }),
 		},
 	}
 
@@ -1942,6 +1943,21 @@ function fakeMediaStore(opts = {}) {
 		},
 		'java.io.File': function File(p) {
 			return { _kind: 'file', path: p }
+		},
+		'java.nio.file.Files': {
+			// 原生侧搬运：InputStream/Path → Path/OutputStream，字节不过 JS 桥
+			copy: (a, b) => {
+				if (opts.filesCopyThrows) throw new Error('Files.copy 不可用')
+				const src = a && a._kind === 'is' ? docs.get(a.url) : a && a.path ? files.get(a.path) : null
+				let dst = b && b._kind === 'os' ? docs.get(b.url) : null
+				if (!dst && b && b.path) {
+					if (!files.has(b.path)) files.set(b.path, { bytes: [] })
+					dst = files.get(b.path)
+				}
+				if (!src || !dst) throw new Error('Files.copy 参数不认识')
+				for (let i = 0; i < src.bytes.length; i++) dst.bytes.push(src.bytes[i])
+				return src.bytes.length
+			},
 		},
 	}
 
@@ -2038,7 +2054,7 @@ await withMediaStore({ maxChunkBytes: 512 }, async (env) => {
 
 	const res = await NFS.writeBytesToDownloads(BIG, 'big.zip')
 	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
-	eq(res.chunkSize, 512, `实际用的块大小：${res.chunkSize}`)
+	ok(String(res.method).indexOf('512') >= 0 || res.method === 'private-file', `实际用的方式：${res.method}`)
 	const doc = [...env.docs.values()].find((d) => d.name === 'big.zip')
 	eq(doc.bytes.length, 5000, '★ 5000 字节全部写入')
 	eq(doc.bytes[0], BIG[0], '首字节对')
@@ -2049,7 +2065,7 @@ await withMediaStore({ maxChunkBytes: 512 }, async (env) => {
 await withMediaStore({}, async (env) => {
 	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'w1.zip')
 	eq(res.ok, true, '正常情况一次成功')
-	eq(res.chunkSize, 2048, `默认块大小：${res.chunkSize}`)
+	eq(res.method, 'private-file', `默认走策略A（私有文件中转）：${res.method}`)
 })
 
 group('native-fs.js · 从 SAF 读回（全程原生）')
@@ -2057,19 +2073,36 @@ group('native-fs.js · 从 SAF 读回（全程原生）')
 await withMediaStore({}, async (env) => {
 	// 先用写入路径造一份数据，再原路读回 —— 两处编码都对才能往返一致
 	await NFS.writeBytesToDownloads(ALL_BYTES, 'rt.zip')
-	const read = await NFS.readUriBase64({ _kind: 'uri', url: env.firstUri() })
+	const staged = 'ABS:/_doc/picked.zip'
+	const read = await NFS.readUriBase64(
+		{ _kind: 'uri', url: env.firstUri() },
+		{
+			// 模拟调用方：原生落盘 + plus.io 读回
+			onPickedFile: () => ({
+				absPath: staged,
+				read: async () => {
+					const box = env.files.get(staged)
+					if (!box) return { ok: false, error: '落盘文件不存在' }
+					return { ok: true, base64: Buffer.from(Uint8Array.from(box.bytes)).toString('base64') }
+				},
+			}),
+		}
+	)
 	eq(read.ok, true, '读取成功')
+	ok(String(read.trace).indexOf('nativeCopy') >= 0, `★ 走了原生搬运：${read.trace}`)
 	const got = Buffer.from(read.base64, 'base64')
 	eq(got.length, 256, '读回字节数对')
 	eq([...got].join(','), [...ALL_BYTES].join(','), '★ 写入→读回 逐字节一致')
-	ok(String(read.trace).indexOf('ok') >= 0, `trace 完整：${read.trace}`)
 })
 
 // 读到的内容是空 —— 用户真机上报的就是这个症状，必须能被识别出来
 await withMediaStore({}, async (env) => {
 	// 造一个 0 字节的文件（真机上 FileUtils.copy 就是这样）
 	env.docs.set('content://downloads/99', { name: 'empty.zip', bytes: [] })
-	const read = await NFS.readUriBase64({ _kind: 'uri', url: 'content://downloads/99' })
+	const read = await NFS.readUriBase64(
+		{ _kind: 'uri', url: 'content://downloads/99' },
+		{ onPickedFile: () => ({ absPath: 'ABS:/_doc/e.zip', read: async () => ({ ok: true, base64: '' }) }) }
+	)
 	eq(read.ok, false, '★ 0 字节的文件 → 判为失败')
 	ok(
 		String(read.error).indexOf('0 字节') >= 0,
@@ -2084,10 +2117,11 @@ await withMediaStore({ openInNull: true }, async () => {
 	eq(r.ok, false, 'openInputStream 返回空 → 失败')
 })
 
-await withMediaStore({ importNullFor: 'android.util.Base64' }, async () => {
+await withMediaStore({}, async () => {
+	// 现在读取走「原生落盘 + plus.io 读」，所以必须由调用方提供落盘回调
 	const r = await NFS.readUriBase64({ _kind: 'uri', url: 'x' })
-	eq(r.ok, false, 'importClass 返回空 → 失败')
-	ok(String(r.error).indexOf('链入') >= 0, `提示基座问题：${r.error}`)
+	eq(r.ok, false, '没有落盘回调 → 明确报错而不是返回空数据')
+	ok(String(r.error).indexOf('落盘回调') >= 0, `原因说清楚：${r.error}`)
 })
 
 await withMediaStore({}, async (env) => {

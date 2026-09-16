@@ -10,8 +10,10 @@ import {
 	writeBytesToDownloads,
 	removePrivateFile,
 	pickFileBytes,
+	absPathOf,
 	hasPlus,
 } from './native-fs.js'
+import { toBase64 } from './photo.js'
 
 export function backupFileName() {
 	return `calorie-backup-${todayKey()}.json`
@@ -323,9 +325,26 @@ export async function pickZipFile() {
 
 	if (isH5) return pickZipOnH5()
 
-	// App：选文件的同时就直接读成 base64。
-	// 不再「先拷到临时文件再用 plus.io 读」—— 真机上那一套读出来是空文件。
-	const picked = await pickFileBytes({ limit: FULL_BACKUP_MAX_BYTES })
+	// App：选文件后让**原生**把内容落成私有文件，再用 plus.io 读回来。
+	//
+	// 为什么不直接在 JS 里读成 base64：真机上 readAllBytes() 拿到的 byte[]
+	// 再传给 encodeToString 时内容就丢了（DCloud #220280、#107510 记的
+	// 「invoke 传 byte[] 参数不可靠」）。而 plus.io 读文件是照片识别
+	// 一直在用的路径，是验证过的。
+	const name = `picked-${Date.now()}.zip`
+	const localUrl = `_doc/${name}`
+
+	const picked = await pickFileBytes({
+		limit: FULL_BACKUP_MAX_BYTES,
+		onPickedFile: () => ({
+			absPath: absPathOf(localUrl),
+			read: () => toBase64(localUrl, null),
+		}),
+	})
+
+	// 不管成败都清掉临时文件
+	removePrivateFile(localUrl)
+
 	if (!picked.ok) {
 		if (picked.cancelled) return picked
 		return {
@@ -338,7 +357,6 @@ export async function pickZipFile() {
 
 	return { ok: true, bytes: base64ToBytes(picked.base64), trace: picked.trace }
 }
-
 /** 把照片字节写进 App 私有目录（恢复备份时用）
  *  —— 实现挪到 native-fs.js，二进制写入逻辑集中在一处
  */
