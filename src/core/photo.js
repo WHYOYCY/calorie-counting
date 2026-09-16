@@ -231,9 +231,12 @@ export function persistPhoto(tempPath) {
 								entry.copyTo(
 									dir,
 									name,
-									(newEntry) =>
-										resolve({ ok: true, path: newEntry.fullPath || `_doc/food/${name}` }),
-									() => resolve({ ok: false, path: '', error: '复制照片失败' })
+									() => resolve({ ok: true, path: `_doc/food/${name}` }),
+									() => {
+										// copyTo 在真机上会跨文件系统失败（照片因此一直没被存下来），
+										// 退回用 plus.zip 做一次原生复制：压缩 → 解压到目标目录
+										fallbackCopy(tempPath, name).then(resolve)
+									}
 								)
 							},
 							() => resolve({ ok: false, path: '', error: '无法创建照片目录' })
@@ -247,6 +250,37 @@ export function persistPhoto(tempPath) {
 	})
 }
 
+/**
+ * 用 plus.zip 做原生文件复制：压缩源文件 → 解压到 _doc/food/。
+ * 不依赖 entry.copyTo（它跨文件系统会失败），也不经过 JS 桥。
+ */
+function fallbackCopy(tempPath, name) {
+	return new Promise((resolve) => {
+		if (!plus.zip || typeof plus.zip.compress !== 'function') {
+			resolve({ ok: false, path: '', error: '复制照片失败（plus.zip 不可用）' })
+			return
+		}
+		const tmpZip = `_doc/ccphoto-${Date.now()}.zip`
+		const toAbs = (u) => plus.io.convertLocalFileSystemURL(u)
+		plus.zip.compress(
+			toAbs(tempPath),
+			toAbs(tmpZip),
+			() => {
+				plus.zip.decompress(
+					toAbs(tmpZip),
+					toAbs('_doc/food/'),
+					() => {
+						plus.io.resolveLocalFileSystemURL(toAbs(tmpZip), (z) => z.remove(() => {}, () => {}), () => {})
+						resolve({ ok: true, path: `_doc/food/${name}` })
+					},
+					(e) =>
+						resolve({ ok: false, path: '', error: '解压照片失败：' + ((e && e.message) || e) })
+				)
+			},
+			(e) => resolve({ ok: false, path: '', error: '压缩照片失败：' + ((e && e.message) || e) })
+		)
+	})
+}
 function byUniRemove(path) {
 	if (typeof uni !== 'undefined' && uni && typeof uni.removeSavedFile === 'function') {
 		uni.removeSavedFile({ filePath: path, fail: () => {} })

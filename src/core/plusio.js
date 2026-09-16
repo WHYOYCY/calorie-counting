@@ -404,6 +404,100 @@ export function zipDecompress(zipLocal, destLocal) {
 	})
 }
 
+/**
+ * 多个路径一起压缩（plus.zip 的 src 支持逗号分隔多个路径）。
+ *
+ * 为什么不用「先 copyTo 到临时目录再压目录」：真机上 plus.io 的
+ * copyTo 跨文件系统会失败（照片一直没被存下来就是这个原因），
+ * 所以干脆不拷 —— 直接把原始文件列表交给 plus.zip。
+ */
+export function zipCompressMany(localUrls, zipLocal) {
+	return new Promise((resolve) => {
+		if (!hasZip()) {
+			resolve({ ok: false, error: 'plus.zip 不可用（需在 HBuilderX 勾 Zip 模块）' })
+			return
+		}
+		const absList = []
+		for (const u of localUrls) {
+			const a = absOf(u)
+			if (!a) {
+				resolve({ ok: false, error: `路径解析失败：${u}` })
+				return
+			}
+			absList.push(a)
+		}
+		const zipAbs = absOf(zipLocal)
+		if (!zipAbs) {
+			resolve({ ok: false, error: '输出路径解析失败' })
+			return
+		}
+		try {
+			plus.zip.compress(
+				absList.join(','),
+				zipAbs,
+				() => resolve({ ok: true, abs: zipAbs }),
+				(e) => resolve({ ok: false, error: '压缩失败：' + ((e && e.message) || e) })
+			)
+		} catch (e) {
+			resolve({ ok: false, error: String((e && e.message) || e) })
+		}
+	})
+}
+
+/**
+ * 递归列出目录下的所有文件。
+ * zip 解出来的目录结构由 plus.zip 决定（可能带一层目录，也可能平铺），
+ * 所以导入端不能假设布局 —— 递归找，看到什么算什么。
+ * @returns {Promise<{ok:boolean, files:Array<{name:string, rel:string, url:string, size:number}>}>}
+ */
+export async function walkDir(localUrl, maxDepth = 3) {
+	const out = []
+	async function step(url, depth) {
+		if (depth > maxDepth) return
+		const r = await listDir(url)
+		if (!r.ok) return
+		for (const item of r.names) {
+			if (item.isFile) {
+				const size = await fileSize(item.url)
+				out.push({
+					name: item.name,
+					rel: item.url.slice(String(localUrl).length).replace(/^\//, ''),
+					url: item.url,
+					size,
+				})
+			} else {
+				await step(item.url, depth + 1)
+			}
+		}
+	}
+	await step(localUrl, 1)
+	return { ok: true, files: out }
+}
+
+/**
+ * 用 plus.zip 做一次「原生复制」：压缩 → 解压到目标目录。
+ *
+ * 为什么不用 entry.copyTo：真机上它跨文件系统会失败。
+ * 而 compress/decompress 是纯原生的，不关心文件系统边界。
+ */
+export async function copyViaZip(fromUrl, destDirUrl, name) {
+	const tmpZip = `_doc/cccopy-${Date.now()}.zip`
+	const z = await zipCompress(fromUrl, tmpZip)
+	if (!z.ok) return { ok: false, error: z.error }
+	const d = await zipDecompress(tmpZip, destDirUrl)
+	await remove(tmpZip)
+	if (!d.ok) return { ok: false, error: d.error }
+	// 解出来的文件名由 compress 决定，通常就是原文件名
+	const list = await listDir(destDirUrl)
+	const hit =
+		list.ok &&
+		list.names.find((x) => x.isFile && (x.name === name || x.name === nameOf(fromUrl)))
+	if (!hit) {
+		return { ok: false, error: '解压后没找到文件', extracted: list.ok ? list.names.map((x) => x.name) : [] }
+	}
+	return { ok: true, url: hit.url }
+}
+
 /** 列出候选目录里符合前缀的文件（导入时找备份用） */
 export async function findBackups(prefix = 'calorie-backup') {
 	const out = []

@@ -2022,14 +2022,30 @@ function fakePlusIO(opts = {}) {
 		: {
 				compress: async (srcAbs, zipAbs, ok, fail) => {
 					if (opts.zipThrows) return fail && fail(new Error('压缩失败'))
-					const src = base(srcAbs).replace(/\/$/, '')
+					// src 可能是「逗号分隔的多个文件路径」，也可能是单个目录
 					const list = []
-					for (const [k, v] of files) {
-						if (k.indexOf(src + '/') !== 0) continue
-						list.push({
-							name: k.slice(src.length + 1),
-							data: new Uint8Array(Buffer.from(v.text, 'utf8')),
-						})
+					const parts = String(srcAbs)
+						.split(',')
+						.map((x) => x.trim())
+						.filter(Boolean)
+					for (const raw of parts) {
+						const src = base(raw).replace(/\/$/, '')
+						if (files.has(src)) {
+							// 单文件：按文件名放进 zip 根
+							list.push({
+								name: src.slice(src.lastIndexOf('/') + 1),
+								data: new Uint8Array(Buffer.from(files.get(src).text, 'utf8')),
+							})
+							continue
+						}
+						// 目录：把下面的文件按相对路径放进去
+						for (const [k, v] of files) {
+							if (k.indexOf(src + '/') !== 0) continue
+							list.push({
+								name: k.slice(src.length + 1),
+								data: new Uint8Array(Buffer.from(v.text, 'utf8')),
+							})
+						}
 					}
 					const bytes = await collectZip(
 						zipChunks(

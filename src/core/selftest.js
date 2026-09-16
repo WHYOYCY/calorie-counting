@@ -12,6 +12,7 @@
  */
 import { callJava, staticField, pathOf, filesClass, isAndroid, androidSdk } from './native-fs.js'
 import { toBase64, deletePhotoFile } from './photo.js'
+import * as PIO from './plusio.js'
 
 const TMP_DIR = '_doc/'
 const TMP_TEXT = `${TMP_DIR}selftest.txt`
@@ -282,6 +283,90 @@ export async function runSelfTest() {
 		add('MediaStore 写入 + 回查大小', false, String((e && e.message) || e))
 	}
 
+	/* ---- 11. plus.io copyTo（照片持久化就靠它） ---- */
+	try {
+		await plusWriteText(`${TMP_DIR}selsrc.txt`, TEST_TEXT)
+		const fromAbs = abs(`${TMP_DIR}selsrc.txt`)
+		const copied = await new Promise((resolve) => {
+			plus.io.resolveLocalFileSystemURL(
+				fromAbs,
+				(entry) => {
+					plus.io.requestFileSystem(
+						plus.io.PRIVATE_DOC,
+						(fs) => {
+							fs.root.getDirectory(
+								'cctest',
+								{ create: true },
+								(dir) => {
+									entry.copyTo(
+										dir,
+										'seldst.txt',
+										() => resolve({ ok: true }),
+										(e) => resolve({ ok: false, error: '复制失败：' + ((e && e.message) || e) })
+									)
+								},
+								() => resolve({ ok: false, error: '建目录失败' })
+							)
+						},
+						() => resolve({ ok: false, error: '访问文件系统失败' })
+					)
+				},
+				() => resolve({ ok: false, error: '源文件不存在' })
+			)
+		})
+		let size = -1
+		if (copied.ok) size = await PIO.fileSize('_doc/cctest/seldst.txt')
+		add(
+			'plus.io copyTo（照片持久化）',
+			copied.ok && size > 0,
+			copied.ok ? (size > 0 ? `复制成功（${size} 字节）` : '复制"成功"但目标是空的') : copied.error
+		)
+	} catch (e) {
+		add('plus.io copyTo（照片持久化）', false, String((e && e.message) || e))
+	}
+
+	/* ---- 12. plus.zip 多路径压缩（导出照片靠它） ---- */
+	if (PIO.hasZip()) {
+		try {
+			await plusWriteText(`${TMP_DIR}z1.txt`, 'AAA')
+			await plusWriteText(`${TMP_DIR}z2.txt`, 'BBB')
+			const z = await PIO.zipCompressMany([`${TMP_DIR}z1.txt`, `${TMP_DIR}z2.txt`], '_doc/cctest/multi.zip')
+			if (!z.ok) {
+				add('plus.zip 多路径压缩', false, z.error)
+			} else {
+				await PIO.remove('_doc/cctest/multiout')
+				const d = await PIO.zipDecompress('_doc/cctest/multi.zip', '_doc/cctest/multiout')
+				if (!d.ok) {
+					add('plus.zip 多路径压缩', false, '解压失败：' + d.error)
+				} else {
+					const w = await PIO.walkDir('_doc/cctest/multiout')
+					const names = w.files.map((f) => f.rel)
+					add(
+						'plus.zip 多路径压缩',
+						names.length === 2,
+						names.length === 2 ? `解出：${names.join('、')}` : `解出 ${names.length} 个：${names.join('、')}`
+					)
+				}
+			}
+		} catch (e) {
+			add('plus.zip 多路径压缩', false, String((e && e.message) || e))
+		}
+
+		/* ---- 13. 用 zip 做原生复制（照片拷回时用） ---- */
+		try {
+			await plusWriteText(`${TMP_DIR}z3.txt`, 'COPYME')
+			const c = await PIO.copyViaZip(`${TMP_DIR}z3.txt`, '_doc/cctest', 'z3.txt')
+			const size = c.ok ? await PIO.fileSize('_doc/cctest/z3.txt') : -1
+			add(
+				'plus.zip 原生复制',
+				c.ok && size > 0,
+				c.ok ? (size > 0 ? `复制成功（${size} 字节）` : '解出来的文件是空的') : c.error
+			)
+		} catch (e) {
+			add('plus.zip 原生复制', false, String((e && e.message) || e))
+		}
+	}
+
 	/* ---- 清理 ---- */
 	for (const p of [TMP_TEXT, TMP_BIN, TMP_COPY]) {
 		try {
@@ -290,6 +375,7 @@ export async function runSelfTest() {
 			/* 清理失败无所谓 */
 		}
 	}
+	await PIO.remove('_doc/cctest')
 
 	return { rows, text: reportOf(rows) }
 }

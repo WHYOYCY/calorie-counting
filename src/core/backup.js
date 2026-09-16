@@ -20,7 +20,10 @@ import {
 	resolveOutDir,
 	writeText,
 	zipCompress,
+	zipCompressMany,
 	zipDecompress,
+	walkDir,
+	copyViaZip,
 } from './plusio.js'
 
 export function backupFileName() {
@@ -28,6 +31,11 @@ export function backupFileName() {
 }
 
 /* ---------------- 本地快照 ---------------- */
+
+/** 导出/恢复用的临时目录 */
+const WORK_EXPORT = '_doc/ccexport'
+const WORK_RESTORE = '_doc/ccrestore'
+const WORK_VERIFY = '_doc/ccverify'
 
 const K_SNAP_INDEX = 'cc_backup_index'
 const snapKey = (ts) => `cc_backup_${ts}`
@@ -273,57 +281,75 @@ export const FULL_BACKUP_MAX_BYTES = 120 * 1024 * 1024
  */
 export async function exportFullBackupNative(plan, filename) {
 	const outDir = resolveOutDir()
-	const work = '_doc/ccexport'
+	const jsonUrl = `${WORK_EXPORT}/backup.json`
 	const zipLocal = `${outDir.url}/${filename}`
 
-	// 1. 清掉上次的临时目录，建新的
-	await remove(work)
-	const made = await mkdir(work)
+	await remove(WORK_EXPORT)
+	const made = await mkdir(WORK_EXPORT)
 	if (!made.ok) return { ok: false, error: made.error }
 
-	// 2. 写 backup.json（文本，plus.io 能写）
-	const wrote = await writeText(`${work}/backup.json`, plan.jsonText)
+	// 1. 写 backup.json（plus.io 是唯一能真正写进去的路径）
+	const wrote = await writeText(jsonUrl, plan.jsonText)
 	if (!wrote.ok) {
-		await remove(work)
+		await remove(WORK_EXPORT)
 		return { ok: false, error: '写 backup.json 失败：' + wrote.error }
 	}
-	// 比字节数：plus.io 按 UTF-8 写，中文一个字符占 3 字节，
-	// 拿字符数去比会误判（记录里有中文菜名，必然不等）
 	const expectBytes = fbutf8.utf8Bytes(plan.jsonText).length
-	const sizeCheck = await fileSize(`${work}/backup.json`)
+	const sizeCheck = await fileSize(jsonUrl)
 	if (sizeCheck !== expectBytes) {
-		await remove(work)
+		await remove(WORK_EXPORT)
 		return { ok: false, error: `backup.json 写进去 ${sizeCheck} 字节，期望 ${expectBytes}` }
 	}
 
-	// 3. 拷照片（plus.io 原生拷贝）
-	const photoDir = `${work}/photos`
-	if (plan.photos.length) {
-		const pd = await mkdir(photoDir)
-		if (!pd.ok) {
-			await remove(work)
-			return { ok: false, error: '建照片目录失败：' + pd.error }
+	// 2. 打包：把 JSON 和照片**一起列给 plus.zip**，不拷文件。
+	//    原先的做法是先把照片 copyTo 到临时目录再压目录，
+	//    但真机上 plus.io 的 copyTo 跨文件系统会失败 ——
+	//    照片一直「丢失」很可能就是它。compress 是纯原生的，不碰这个问题。
+	const srcs = [jsonUrl].concat(plan.photos.map((p) => p.from))
+	let zipped = await zipCompressMany(srcs, zipLocal)
+
+	// 全部一起压失败时，退一步：先压 JSON，再逐张追加压（plus.zip 不支持追加，
+	// 所以这里只作为「至少保住记录」的降级）
+	if (!zipped.ok && plan.photos.length) {
+		const onlyJson = await zipCompress(jsonUrl, zipLocal)
+		await remove(WORK_EXPORT)
+		if (!onlyJson.ok) return { ok: false, error: onlyJson.error }
+		const size = await fileSize(zipLocal)
+		return {
+			ok: true,
+			where: zipLocal,
+			absPath: absOf(zipLocal),
+			userVisible: outDir.visible,
+			bytes: size,
+			photos: 0,
+			missing: plan.photos.map((p) => p.name),
+			dirLabel: outDir.label,
+			warn: '照片没能打进 zip（' + zipped.error + '），备份里只有记录',
 		}
 	}
-	let copied = 0
-	const missed = []
-	for (const ph of plan.photos) {
-		const c = await copyFile(ph.from, `${photoDir}/${ph.name}`)
-		if (c.ok) copied++
-		else missed.push(ph.name)
-	}
 
-	// 4. 打包（plus.zip 原生压缩）
-	const zipped = await zipCompress(work, zipLocal)
-	if (!zipped.ok) {
-		await remove(work)
-		return { ok: false, error: zipped.error }
-	}
+	await remove(WORK_EXPORT)
+	if (!zipped.ok) return { ok: false, error: zipped.error }
+
 	const zipSize = await fileSize(zipLocal)
-	await remove(work)
+	if (!(zipSize > 0)) return { ok: false, error: `生成的 zip 大小异常（${zipSize} 字节）` }
 
-	if (!(zipSize > 0)) {
-		return { ok: false, error: `生成的 zip 大小异常（${zipSize} 字节）` }
+	// 回读一遍，确认照片真的进 zip 了。
+	// plus.zip 对不存在的路径是**静默跳过**的 —— 不回读就不知道有没有漏，
+	// 而「导出说成功、实际没带图片」正是之前踩的坑。
+	const want = plan.photos.map((p) => p.name)
+	let included = []
+	const vd = await zipDecompress(zipLocal, WORK_VERIFY)
+	if (vd.ok) {
+		const w = await walkDir(WORK_VERIFY)
+		included = w.files.map((f) => f.name)
+	}
+	await remove(WORK_VERIFY)
+
+	const missing = want.filter((n) => included.indexOf(n) < 0)
+	const hasJson = included.indexOf('backup.json') >= 0
+	if (!hasJson) {
+		return { ok: false, error: 'zip 里没有 backup.json（打包有问题）' }
 	}
 
 	return {
@@ -332,12 +358,11 @@ export async function exportFullBackupNative(plan, filename) {
 		absPath: absOf(zipLocal),
 		userVisible: outDir.visible,
 		bytes: zipSize,
-		photos: copied,
-		missing: missed,
+		photos: included.filter((n) => n !== 'backup.json').length,
+		missing,
 		dirLabel: outDir.label,
 	}
 }
-
 /**
  * 列出可供恢复的备份文件（扫描下载 / 文档 / 私有目录）。
  * 不走系统文件选择器：SAF 选来的 content:// 在真机上读不出来
@@ -359,74 +384,73 @@ export async function listBackupFiles() {
  * @returns {Promise<{ok:boolean, payload?:object, photos?:number, error?:string}>}
  */
 export async function loadBackupFromFile(fileUrl) {
-	const work = '_doc/ccrestore'
-	await remove(work)
-	const made = await mkdir(work)
+	await remove(WORK_RESTORE)
+	const made = await mkdir(WORK_RESTORE)
 	if (!made.ok) return { ok: false, error: made.error }
 
-	const un = await zipDecompress(fileUrl, work)
+	const un = await zipDecompress(fileUrl, WORK_RESTORE)
 	if (!un.ok) {
-		await remove(work)
+		await remove(WORK_RESTORE)
 		return { ok: false, error: un.error }
 	}
 
-	// backup.json 可能在根，也可能在压缩时带了一层目录里
-	let jsonUrl = `${work}/backup.json`
-	let text = await readBase64Text(jsonUrl)
-	if (!text.ok) {
-		const sub = await listDir(work)
-		const dir = sub.ok ? sub.names.find((x) => !x.isFile) : null
-		if (dir) {
-			jsonUrl = `${dir.url}/backup.json`
-			text = await readBase64Text(jsonUrl)
+	// zip 解出来的布局由 plus.zip 决定（可能平铺，也可能带一层目录），
+	// 所以递归找，不假设结构
+	const walked = await walkDir(WORK_RESTORE)
+	const files = walked.files
+	const jsonFile = files.find((f) => f.name === 'backup.json')
+	if (!jsonFile) {
+		await remove(WORK_RESTORE)
+		return {
+			ok: false,
+			error: '备份里找不到 backup.json（解出来的文件：' +
+				(files.map((f) => f.rel).join('、') || '空') + '）',
 		}
 	}
-	if (!text.ok) {
-		await remove(work)
-		return { ok: false, error: '备份里找不到 backup.json（' + text.error + '）' }
+
+	const jr = await readBase64(jsonFile.url)
+	if (!jr.ok) {
+		await remove(WORK_RESTORE)
+		return { ok: false, error: '读 backup.json 失败：' + jr.error }
 	}
 
 	let payload = null
 	try {
-		payload = JSON.parse(text.text)
+		payload = JSON.parse(fbutf8.utf8Decode(base64ToBytes(jr.base64)))
 	} catch (e) {
-		await remove(work)
+		await remove(WORK_RESTORE)
 		return { ok: false, error: 'backup.json 解析失败' }
 	}
 	if (!payload || !Array.isArray(payload.records)) {
-		await remove(work)
+		await remove(WORK_RESTORE)
 		return { ok: false, error: '备份格式不正确：缺少 records' }
 	}
 
-	// 照片：从解压目录拷回 _doc/food/，并把记录里的路径改成新位置
-	const base = jsonUrl.slice(0, jsonUrl.lastIndexOf('/'))
-	const photoDir = `${base}/photos`
-	const dirList = await listDir(photoDir)
-	const names = dirList.ok ? dirList.names.filter((x) => x.isFile).map((x) => x.name) : []
-	const have = new Set(names)
+	// 照片：按**文件名**匹配，不论它在 zip 里落在哪一层
+	const images = files.filter((f) => /\.(jpe?g|png|webp|gif|bmp)$/i.test(f.name))
+	const byName = new Map(images.map((f) => [f.name, f]))
 
-	let photos = 0
+	// 先决定每条记录指向哪张照片；备份里没带的清空，不留死链
 	const records = payload.records.map((r) => {
 		if (!r || !r.photo) return r
 		const p = String(r.photo)
-		const n = p.indexOf('photos/') === 0 ? p.slice(7) : p.slice(p.lastIndexOf('/') + 1)
-		if (!n || !have.has(n)) {
-			// 备份里没带这张 → 清空，别留死链
-			return { ...r, photo: '' }
-		}
+		const n = p.slice(p.lastIndexOf('/') + 1)
+		if (!n || !byName.has(n)) return { ...r, photo: '' }
 		return { ...r, photo: `_doc/food/${n}` }
 	})
 
-	// 真正拷照片（异步逐个来）
-	for (const n of names) {
-		const c = await copyFile(`${photoDir}/${n}`, `_doc/food/${n}`)
+	// 再逐张拷回 _doc/food/ —— 用 zip 做原生复制（copyTo 跨文件系统会失败）
+	let photos = 0
+	const needed = new Set(records.filter((r) => r.photo).map((r) => r.photo.slice('_doc/food/'.length)))
+	for (const n of needed) {
+		const src = byName.get(n)
+		const c = await copyViaZip(src.url, '_doc/food', n)
 		if (c.ok) photos++
 	}
 
-	await remove(work)
-	return { ok: true, payload: { ...payload, records }, photos, total: names.length }
+	await remove(WORK_RESTORE)
+	return { ok: true, payload: { ...payload, records }, photos, total: needed.size }
 }
-
 /** 读取一个文本文件（走 plus.io 读 base64 再解码成 UTF-8 文本） */
 async function readBase64Text(localUrl) {
 	const r = await readBase64(localUrl)
