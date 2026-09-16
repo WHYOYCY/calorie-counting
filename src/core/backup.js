@@ -5,37 +5,27 @@
  */
 import { todayKey } from './date.js'
 import { hasStorage, readRaw, writeRaw, removeRaw } from './storage.js'
-import { base64ToBytes } from './zip.js'
-import { _internal as fbutf8 } from './fullbackup.js'
+import { base64ToBytes } from './base64.js'
+import { utf8Bytes, utf8Decode } from './utf8.js'
 import {
+	_resetOutDirs,
 	absOf,
-	copyFile,
 	fileSize,
 	findBackups,
 	hasPlusIo,
-	listDir,
-	mkdir,
-	readBase64,
-	remove,
-	resolveOutDir,
-	writeText,
-	zipCompress,
-	zipCompressMany,
-	zipDecompress,
-	walkDir,
-	copyViaZip,
+	outDirCandidates,
+	readText,
+	writeTextChecked,
 } from './plusio.js'
+
+export { _resetOutDirs }
+import { parseFullBackupText } from './fullbackup.js'
 
 export function backupFileName() {
 	return `calorie-backup-${todayKey()}.json`
 }
 
 /* ---------------- 本地快照 ---------------- */
-
-/** 导出/恢复用的临时目录 */
-const WORK_EXPORT = '_doc/ccexport'
-const WORK_RESTORE = '_doc/ccrestore'
-const WORK_VERIFY = '_doc/ccverify'
 
 const K_SNAP_INDEX = 'cc_backup_index'
 const snapKey = (ts) => `cc_backup_${ts}`
@@ -279,251 +269,147 @@ export const FULL_BACKUP_MAX_BYTES = 120 * 1024 * 1024
  *
  * @param {object} plan  { jsonText, photos:[{from, name}] }  由调用方准备
  */
-export async function exportFullBackupNative(plan, filename) {
-	const outDir = resolveOutDir()
-	const jsonUrl = `${WORK_EXPORT}/backup.json`
-	const zipLocal = `${outDir.url}/${filename}`
-
-	await remove(WORK_EXPORT)
-	const made = await mkdir(WORK_EXPORT)
-	if (!made.ok) return { ok: false, error: made.error }
-
-	// 1. 写 backup.json（plus.io 是唯一能真正写进去的路径）
-	const wrote = await writeText(jsonUrl, plan.jsonText)
-	if (!wrote.ok) {
-		await remove(WORK_EXPORT)
-		return { ok: false, error: '写 backup.json 失败：' + wrote.error }
-	}
-	const expectBytes = fbutf8.utf8Bytes(plan.jsonText).length
-	const sizeCheck = await fileSize(jsonUrl)
-	if (sizeCheck !== expectBytes) {
-		await remove(WORK_EXPORT)
-		return { ok: false, error: `backup.json 写进去 ${sizeCheck} 字节，期望 ${expectBytes}` }
-	}
-
-	// 2. 打包：把 JSON 和照片**一起列给 plus.zip**，不拷文件。
-	//    原先的做法是先把照片 copyTo 到临时目录再压目录，
-	//    但真机上 plus.io 的 copyTo 跨文件系统会失败 ——
-	//    照片一直「丢失」很可能就是它。compress 是纯原生的，不碰这个问题。
-	const srcs = [jsonUrl].concat(plan.photos.map((p) => p.from))
-	let zipped = await zipCompressMany(srcs, zipLocal)
-
-	// 全部一起压失败时，退一步：先压 JSON，再逐张追加压（plus.zip 不支持追加，
-	// 所以这里只作为「至少保住记录」的降级）
-	if (!zipped.ok && plan.photos.length) {
-		const onlyJson = await zipCompress(jsonUrl, zipLocal)
-		await remove(WORK_EXPORT)
-		if (!onlyJson.ok) return { ok: false, error: onlyJson.error }
-		const size = await fileSize(zipLocal)
-		return {
-			ok: true,
-			where: zipLocal,
-			absPath: absOf(zipLocal),
-			userVisible: outDir.visible,
-			bytes: size,
-			photos: 0,
-			missing: plan.photos.map((p) => p.name),
-			dirLabel: outDir.label,
-			warn: '照片没能打进 zip（' + zipped.error + '），备份里只有记录',
-		}
-	}
-
-	await remove(WORK_EXPORT)
-	if (!zipped.ok) return { ok: false, error: zipped.error }
-
-	const zipSize = await fileSize(zipLocal)
-	if (!(zipSize > 0)) return { ok: false, error: `生成的 zip 大小异常（${zipSize} 字节）` }
-
-	// 回读一遍，确认照片真的进 zip 了。
-	// plus.zip 对不存在的路径是**静默跳过**的 —— 不回读就不知道有没有漏，
-	// 而「导出说成功、实际没带图片」正是之前踩的坑。
-	const want = plan.photos.map((p) => p.name)
-	let included = []
-	const vd = await zipDecompress(zipLocal, WORK_VERIFY)
-	if (vd.ok) {
-		const w = await walkDir(WORK_VERIFY)
-		included = w.files.map((f) => f.name)
-	}
-	await remove(WORK_VERIFY)
-
-	const missing = want.filter((n) => included.indexOf(n) < 0)
-	const hasJson = included.indexOf('backup.json') >= 0
-	if (!hasJson) {
-		return { ok: false, error: 'zip 里没有 backup.json（打包有问题）' }
-	}
-
-	return {
-		ok: true,
-		where: zipLocal,
-		absPath: absOf(zipLocal),
-		userVisible: outDir.visible,
-		bytes: zipSize,
-		photos: included.filter((n) => n !== 'backup.json').length,
-		missing,
-		dirLabel: outDir.label,
-	}
-}
 /**
- * 列出可供恢复的备份文件（扫描下载 / 文档 / 私有目录）。
- * 不走系统文件选择器：SAF 选来的 content:// 在真机上读不出来
- * （plus.io 读不了 content://，Native.js 读取也失败）。
+ * 把完整备份文本写到用户能找到的地方。
+ *
+ * App：plus.io 写文本（自检证明这台设备上唯一真的能写进去的路径），
+ *      逐个候选目录试，写完核对字节数。
+ * H5：浏览器下载一个 .json。
+ *
+ * @returns {Promise<{ok:boolean, where?:string, absPath?:string, userVisible?:boolean,
+ *                    bytes?:number, dirLabel?:string, error?:string}>}
  */
-export async function listBackupFiles() {
-	const list = await findBackups('calorie-backup')
-	// 附带大小，方便用户辨认
-	const out = []
-	for (const f of list) {
-		const size = await fileSize(f.url)
-		out.push({ ...f, size })
-	}
-	return out.sort((a, b) => String(b.name).localeCompare(String(a.name)))
-}
+export async function exportFullBackupText(text, filename = backupFileName()) {
+	const body = String(text || '')
+	if (!body) return { ok: false, error: '没有可导出的内容' }
 
-/**
- * 从指定的备份文件恢复：原生解压 → 读 backup.json → 把照片拷回私有目录。
- * @returns {Promise<{ok:boolean, payload?:object, photos?:number, error?:string}>}
- */
-export async function loadBackupFromFile(fileUrl) {
-	await remove(WORK_RESTORE)
-	const made = await mkdir(WORK_RESTORE)
-	if (!made.ok) return { ok: false, error: made.error }
-
-	const un = await zipDecompress(fileUrl, WORK_RESTORE)
-	if (!un.ok) {
-		await remove(WORK_RESTORE)
-		return { ok: false, error: un.error }
-	}
-
-	// zip 解出来的布局由 plus.zip 决定（可能平铺，也可能带一层目录），
-	// 所以递归找，不假设结构
-	const walked = await walkDir(WORK_RESTORE)
-	const files = walked.files
-	const jsonFile = files.find((f) => f.name === 'backup.json')
-	if (!jsonFile) {
-		await remove(WORK_RESTORE)
-		return {
-			ok: false,
-			error: '备份里找不到 backup.json（解出来的文件：' +
-				(files.map((f) => f.rel).join('、') || '空') + '）',
-		}
-	}
-
-	const jr = await readBase64(jsonFile.url)
-	if (!jr.ok) {
-		await remove(WORK_RESTORE)
-		return { ok: false, error: '读 backup.json 失败：' + jr.error }
-	}
-
-	let payload = null
-	try {
-		payload = JSON.parse(fbutf8.utf8Decode(base64ToBytes(jr.base64)))
-	} catch (e) {
-		await remove(WORK_RESTORE)
-		return { ok: false, error: 'backup.json 解析失败' }
-	}
-	if (!payload || !Array.isArray(payload.records)) {
-		await remove(WORK_RESTORE)
-		return { ok: false, error: '备份格式不正确：缺少 records' }
-	}
-
-	// 照片：按**文件名**匹配，不论它在 zip 里落在哪一层
-	const images = files.filter((f) => /\.(jpe?g|png|webp|gif|bmp)$/i.test(f.name))
-	const byName = new Map(images.map((f) => [f.name, f]))
-
-	// 先决定每条记录指向哪张照片；备份里没带的清空，不留死链
-	const records = payload.records.map((r) => {
-		if (!r || !r.photo) return r
-		const p = String(r.photo)
-		const n = p.slice(p.lastIndexOf('/') + 1)
-		if (!n || !byName.has(n)) return { ...r, photo: '' }
-		return { ...r, photo: `_doc/food/${n}` }
-	})
-
-	// 再逐张拷回 _doc/food/ —— 用 zip 做原生复制（copyTo 跨文件系统会失败）
-	let photos = 0
-	const needed = new Set(records.filter((r) => r.photo).map((r) => r.photo.slice('_doc/food/'.length)))
-	for (const n of needed) {
-		const src = byName.get(n)
-		const c = await copyViaZip(src.url, '_doc/food', n)
-		if (c.ok) photos++
-	}
-
-	await remove(WORK_RESTORE)
-	return { ok: true, payload: { ...payload, records }, photos, total: needed.size }
-}
-/** 读取一个文本文件（走 plus.io 读 base64 再解码成 UTF-8 文本） */
-async function readBase64Text(localUrl) {
-	const r = await readBase64(localUrl)
-	if (!r.ok) return { ok: false, error: r.error }
-	return { ok: true, text: fbutf8.utf8Decode(base64ToBytes(r.base64)) }
-}
-
-
-/** 把完整备份交给用户：H5 浏览器下载二进制 zip / App 走原生链路 */
-export async function persistBackupZip(bytes, filename, plan) {
-	const isH5 = typeof document !== 'undefined' && typeof Blob !== 'undefined'
-	if (hasPlusIo() && plan) return exportFullBackupNative(plan, filename)
-	if (isH5) {
+	// H5：直接下载
+	if (typeof document !== 'undefined' && typeof Blob !== 'undefined') {
 		try {
-			const blob = new Blob([bytes], { type: 'application/zip' })
+			const blob = new Blob([body], { type: 'application/json' })
 			const url = URL.createObjectURL(blob)
 			const a = document.createElement('a')
 			a.href = url
 			a.download = filename
+			document.body.appendChild(a)
 			a.click()
-			setTimeout(() => URL.revokeObjectURL(url), 1000)
-			return { ok: true, mode: 'download' }
+			document.body.removeChild(a)
+			setTimeout(() => URL.revokeObjectURL(url), 4000)
+			return { ok: true, where: filename, bytes: body.length, userVisible: true, dirLabel: '浏览器下载' }
 		} catch (e) {
-			return { ok: false, error: '浏览器下载失败' }
+			return { ok: false, error: '浏览器下载失败：' + String((e && e.message) || e) }
 		}
 	}
-	return { ok: false, error: '当前环境不支持保存文件' }
-}/** H5：用 <input type=file> 选一个 zip 并读成字节 */
-function pickZipOnH5() {
-	return new Promise((resolve) => {
-		try {
-			const input = document.createElement('input')
-			input.type = 'file'
-			input.accept = '.zip,application/zip'
-			input.style.display = 'none'
-			input.onchange = () => {
-				const file = input.files && input.files[0]
-				if (!file) {
-					resolve({ ok: false, cancelled: true, error: '' })
-					return
-				}
-				if (file.size > FULL_BACKUP_MAX_BYTES) {
-					resolve({ ok: false, error: '这个备份文件太大了，当前版本不支持' })
-					return
-				}
-				const reader = new FileReader()
-				reader.onload = () => {
-					resolve({ ok: true, bytes: new Uint8Array(reader.result) })
-				}
-				reader.onerror = () => resolve({ ok: false, error: '读取文件失败' })
-				reader.readAsArrayBuffer(file)
-			}
-			document.body.appendChild(input)
-			input.click()
-			setTimeout(() => {
-				if (input.parentNode) input.parentNode.removeChild(input)
-			}, 60000)
-		} catch (e) {
-			resolve({ ok: false, error: '无法打开文件选择器' })
+
+	if (!hasPlusIo()) return { ok: false, error: '当前环境不支持导出文件' }
+
+	const dirs = await outDirCandidates()
+	const tried = []
+	for (const d of dirs) {
+		const url = `${d.url}/${filename}`
+		const w = await writeTextChecked(url, body)
+		if (!w.ok) {
+			tried.push(`${d.label}：${w.error}`)
+			continue
 		}
-	})
+		return {
+			ok: true,
+			where: url,
+			absPath: absOf(url),
+			userVisible: d.visible,
+			bytes: w.bytes,
+			dirLabel: d.label,
+		}
+	}
+	return { ok: false, error: '每个目录都写不进去：' + tried.join('；') }
 }
 
 /**
- * H5 端选一个备份文件（浏览器 input）并读成二进制 zip。
- *
- * App 端不走这里 —— 真机上 SAF 选来的 content:// 读不出来
- * （plus.io 读不了 content://，Native.js 读取也失效），
- * 所以 App 改成扫描「下载 / 文档」目录，见 listBackupFiles。
+ * 扫描候选目录里已有的完整备份文件（新的在前）。
+ * 导入时列给用户选 —— 不用系统文件选择器：真机上 SAF 选来的
+ * content:// 路径读不出来。
  */
-export async function pickZipFile() {
-	if (typeof document === 'undefined') {
-		return { ok: false, unsupported: true, error: 'App 端请用「从文件恢复」扫描目录' }
+export async function listBackupFiles() {
+	if (!hasPlusIo()) return { ok: true, files: [] }
+	const out = []
+	const seen = new Set()
+	for (const d of await outDirCandidates()) {
+		const found = await findBackups(d.url, 'calorie-backup')
+		for (const f of found) {
+			if (seen.has(f.name)) continue
+			seen.add(f.name)
+			const size = await fileSize(f.url)
+			out.push({ ...f, size, dir: d.label, visible: d.visible })
+		}
 	}
-	return pickZipOnH5()
+	// 私有目录根也扫一遍（早期版本可能把备份放在那儿）
+	const priv = await findBackups('_doc', 'calorie-backup')
+	for (const f of priv) {
+		if (seen.has(f.name)) continue
+		seen.add(f.name)
+		const size = await fileSize(f.url)
+		out.push({ ...f, size, dir: '应用私有目录', visible: false })
+	}
+	out.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
+	return { ok: true, files: out }
+}
+
+/**
+ * 读一个备份文件 → 解析成 payload。
+ * 只读文本：自检证明 plus.io 读文本是通的，读二进制不是。
+ */
+export async function loadBackupFromFile(fileUrl) {
+	const r = await readText(fileUrl)
+	if (!r.ok) return { ok: false, error: '读取备份失败：' + r.error }
+	const text = String(r.text || '').trim()
+	if (!text) return { ok: false, error: '备份文件是空的（可能是 0 字节）' }
+	const parsed = parseFullBackupText(text)
+	if (!parsed.ok) return parsed
+	return { ok: true, payload: parsed.payload, bytes: text.length }
+}
+
+/* ---------------- H5：从 <input type=file> 读 ---------------- */
+
+/** H5 下让用户选一个备份文件并读出文本 */
+export function pickBackupText() {
+	return new Promise((resolve) => {
+		if (typeof document === 'undefined') {
+			resolve({ ok: false, error: '当前环境不支持文件选择' })
+			return
+		}
+		const input = document.createElement('input')
+		input.type = 'file'
+		input.accept = '.json,application/json'
+		input.style.position = 'fixed'
+		input.style.left = '-9999px'
+		document.body.appendChild(input)
+		let done = false
+		const finish = (v) => {
+			if (done) return
+			done = true
+			try {
+				document.body.removeChild(input)
+			} catch (e) {
+				/* 已经移除 */
+			}
+			resolve(v)
+		}
+		input.onchange = () => {
+			const f = input.files && input.files[0]
+			if (!f) {
+				finish({ ok: false, cancelled: true, error: '' })
+				return
+			}
+			const fr = new FileReader()
+			fr.onload = () => finish({ ok: true, text: String(fr.result || ''), name: f.name })
+			fr.onerror = () => finish({ ok: false, error: '读取所选文件失败' })
+			fr.readAsText(f)
+		}
+		window.addEventListener(
+			'focus',
+			() => setTimeout(() => finish({ ok: false, cancelled: true, error: '' }), 800),
+			{ once: true }
+		)
+		input.click()
+	})
 }

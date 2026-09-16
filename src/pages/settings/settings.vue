@@ -286,23 +286,20 @@ import {
 } from '../../core/backup.js'
 import { probe, saveToDownloads } from '../../core/native-fs.js'
 import {
+	exportFullBackupText,
 	listBackupFiles,
 	loadBackupFromFile,
-	pickZipFile,
-	persistBackupZip,
+	pickBackupText,
 } from '../../core/backup.js'
-import { restoreFullBackup } from '../../core/fullbackup-io.js'
-import { summarizeFullBackup } from '../../core/fullbackup.js'
-import { runSelfTest } from '../../core/selftest.js'
-import { hasPlusIo, hasZip } from '../../core/plusio.js'
 import {
-	buildFullBackupZip,
-	buildExportPlan,
 	applyRestoredBackup,
-	summarizePayload,
+	buildFullBackupJson,
 	fullBackupFileName,
 	humanSize,
+	summarizePayload,
 } from '../../core/fullbackup-io.js'
+import { parseFullBackupText } from '../../core/fullbackup.js'
+import { runSelfTest } from '../../core/selftest.js'
 import { testConnection } from '../../core/ai.js'
 
 const showKey = ref(false)
@@ -660,108 +657,107 @@ const NL = String.fromCharCode(10)
 /**
  * 导出完整备份。
  *
- * 走 plus.io + plus.zip：真机自检证明 Native.js 的写入全部失败，
- * 而 plus.io 的文本写入与 plus.zip 的原生压缩都能用。
- * JS 只产出 JSON 文本与照片路径，字节一次都不过桥。
+ * 产出**一个普通的 JSON 文本文件**：记录 + 每张照片的 base64。
+ * 真机自检证明这台设备上只有 plus.io 的文本写入能真正写进去，
+ * 所以不再用 zip / copyTo / Native.js —— 那条链上没有任何一步
+ * 是「写完不知道成没成」的。
  */
 async function doFullBackup() {
 	if (fullBusy.value) return
 	fullBusy.value = true
-	uni.showLoading({ title: '打包中…', mask: true })
+	uni.showLoading({ title: '整理照片中…', mask: true })
 
-	const plan = buildExportPlan()
-	const name = fullBackupFileName()
-
-	// App：走 plus.io + plus.zip（真机上唯一能写进去的路），JS 不产出字节
-	// H5：没有 plus.zip，用 JS 打好 zip 再交给浏览器下载
-	let res
-	if (hasPlusIo() && hasZip()) {
-		res = await persistBackupZip(null, name, plan)
-	} else {
-		const built = await buildFullBackupZip()
-		if (!built.ok) {
-			uni.hideLoading()
-			fullBusy.value = false
-			uni.showModal({ title: '打包失败', content: built.error || '未知错误', showCancel: false })
-			return
-		}
-		res = await persistBackupZip(built.bytes, name)
+	const built = await buildFullBackupJson()
+	if (!built.ok) {
+		uni.hideLoading()
+		fullBusy.value = false
+		uni.showModal({ title: '没法导出', content: built.error || '未知错误', showCancel: false })
+		return
 	}
+
+	const res = await exportFullBackupText(built.text, fullBackupFileName())
 	uni.hideLoading()
 	fullBusy.value = false
 
 	if (!res.ok) {
 		uni.showModal({
 			title: '导出失败',
-			content: `${res.error || '未知错误'}
-
-可以点「原生能力自检」看看哪条路不通。`,
+			content: `${res.error || '未知错误'}${NL}${NL}可以点「原生能力自检」看看哪条路不通。`,
 			showCancel: false,
 		})
 		return
 	}
 
 	const detail = [
-		`${plan.recordCount} 条记录，${plan.photos.length - (res.missing || []).length} 张照片`,
-		res.missing && res.missing.length ? `有 ${res.missing.length} 张照片文件已丢失，已跳过` : '',
-		`大小 ${humanSize(res.bytes)}`,
-	].filter(Boolean)
+		`${built.stats.records} 条记录，${built.stats.photos} 张照片`,
+		humanSize(res.bytes),
+	]
+	if (built.stats.dropped) {
+		detail.push(`有 ${built.stats.dropped} 张照片文件已经不在了，这 ${built.stats.dropped} 条记录的图片会是空的`)
+	}
 
 	if (res.userVisible) {
 		uni.showModal({
 			title: '完整备份已导出',
-			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath}${NL}（标「${res.dirLabel}」的目录，文件管理器里能看到）${NL}${NL}换手机时把这个 zip 拷过去，在新手机上用「从文件恢复」。`,
+			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath}${NL}（标「${res.dirLabel}」的目录，文件管理器里能看到）${NL}${NL}换手机时把这个文件拷过去，在新手机上用「从文件恢复」。`,
 			showCancel: false,
 		})
 	} else {
 		uni.showModal({
 			title: '已导出（但目录是私有的）',
-			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath}${NL}${NL}这个目录文件管理器看不到。建议用系统分享发到微信或网盘，再拷到新手机。`,
+			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath}${NL}${NL}这个目录文件管理器看不到。建议用「分享备份文件」发到微信或网盘，再拷到新手机。`,
 			showCancel: false,
 		})
 	}
+}
+
+/** 确认后恢复（App 与 H5 共用） */
+async function confirmAndRestore(payload, name) {
+	const sum = summarizePayload(payload)
+	uni.showModal({
+		title: '用这个备份覆盖当前数据？',
+		content: `${name ? name + NL : ''}备份里：${sum.records} 条记录，${sum.photos} 张照片。${NL}${NL}当前数据会先自动在本机存一份，可以再退回来。`,
+		confirmText: '恢复',
+		success: async (r) => {
+			if (!r.confirm) return
+			uni.showLoading({ title: '恢复中…', mask: true })
+			const applied = await applyRestoredBackup(payload)
+			uni.hideLoading()
+			refresh()
+			if (!applied.ok) {
+				uni.showModal({ title: '恢复失败', content: applied.error || '未知错误', showCancel: false })
+				return
+			}
+			const parts = [`${applied.records} 条记录`, `${applied.photos} 张照片`]
+			if (applied.missing && applied.missing.length) {
+				parts.push(`${applied.missing.length} 张照片备份里就没有（对应记录的图片为空）`)
+			}
+			if (applied.failed && applied.failed.length) {
+				parts.push(`${applied.failed.length} 张照片写回失败`)
+			}
+			uni.showModal({ title: '已恢复', content: parts.join('，') + '。', showCancel: false })
+		},
+	})
 }
 
 /** 从备份文件恢复 */
 async function doFullRestore() {
 	if (fullBusy.value) return
 
-	// H5：没有 plus.io，走浏览器文件选择器 + 内存里解 zip
+	// H5：浏览器文件选择器
 	if (typeof document !== 'undefined') {
-		const picked = await pickZipFile()
+		const picked = await pickBackupText()
 		if (!picked.ok) {
 			if (picked.cancelled) return
-			uni.showModal({
-				title: '没能读取所选文件',
-				content: `${picked.error || '未知错误'}${picked.trace ? NL + NL + picked.trace : ''}`,
-				showCancel: false,
-			})
+			uni.showModal({ title: '没能读取所选文件', content: picked.error || '未知错误', showCancel: false })
 			return
 		}
-		const sum = summarizeFullBackup(picked.bytes)
-		if (!sum.ok) {
-			uni.showModal({ title: '这不是有效的完整备份', content: sum.error, showCancel: false })
+		const parsed = parseFullBackupText(picked.text)
+		if (!parsed.ok) {
+			uni.showModal({ title: '这不是有效的完整备份', content: parsed.error, showCancel: false })
 			return
 		}
-		uni.showModal({
-			title: '用这个备份覆盖当前数据？',
-			content: `备份里：${sum.records} 条记录，${sum.photos} 张照片。`,
-			confirmText: '恢复',
-			success: async (r) => {
-				if (!r.confirm) return
-				uni.showLoading({ title: '恢复中…', mask: true })
-				const res = await restoreFullBackup(picked.bytes, {
-					writePhoto: async () => ({ ok: false, error: 'H5 不保存照片' }),
-				})
-				uni.hideLoading()
-				refresh()
-				uni.showModal({
-					title: res.ok ? '已恢复' : '恢复失败',
-					content: res.ok ? `${res.records} 条记录。` : res.error || '未知错误',
-					showCancel: false,
-				})
-			},
-		})
+		await confirmAndRestore(parsed.payload, picked.name)
 		return
 	}
 
@@ -769,17 +765,18 @@ async function doFullRestore() {
 	// 在真机上读不出来（plus.io 读不了 content://，Native.js 读取也失效）
 	fullBusy.value = true
 	uni.showLoading({ title: '查找备份…', mask: true })
-	const list = await listBackupFiles()
+	const found = await listBackupFiles()
 	uni.hideLoading()
 	fullBusy.value = false
 
+	const list = (found && found.files) || []
 	if (!list.length) {
 		uni.showModal({
 			title: '没找到备份文件',
 			content:
-				'把之前导出的 zip 放到手机的「下载」目录，再点一次「从文件恢复」。' +
+				'把之前导出的备份（文件名以 calorie-backup 开头的 .json）放到手机的「下载」目录，再点一次「从文件恢复」。' +
 				NL +
-				'（文件名以 calorie-backup 开头）',
+				'如果你是从别的手机拷过来的，请先确认文件确实拷进去了。',
 			showCancel: false,
 		})
 		return
@@ -794,7 +791,7 @@ async function pickRestoreFile(f) {
 	restorePick.value = false
 	if (fullBusy.value) return
 	fullBusy.value = true
-	uni.showLoading({ title: '解压中…', mask: true })
+	uni.showLoading({ title: '读取备份…', mask: true })
 
 	const loaded = await loadBackupFromFile(f.url)
 	uni.hideLoading()
@@ -804,27 +801,7 @@ async function pickRestoreFile(f) {
 		uni.showModal({ title: '读取备份失败', content: loaded.error || '未知错误', showCancel: false })
 		return
 	}
-
-	const sum = summarizePayload(loaded.payload)
-	uni.showModal({
-		title: '用这个备份覆盖当前数据？',
-		content: `备份里：${sum.records} 条记录，${loaded.photos} 张照片。${NL}${NL}当前数据会先自动在本机存一份，可以再退回来。`,
-		confirmText: '恢复',
-		success: (r) => {
-			if (!r.confirm) return
-			const applied = applyRestoredBackup(loaded.payload)
-			refresh()
-			if (!applied.ok) {
-				uni.showModal({ title: '恢复失败', content: applied.error, showCancel: false })
-				return
-			}
-			uni.showModal({
-				title: '已恢复',
-				content: `${applied.records} 条记录，${loaded.photos} 张照片。`,
-				showCancel: false,
-			})
-		},
-	})
+	await confirmAndRestore(loaded.payload, f.name)
 }
 
 /* ---------------- 本机自动备份 ---------------- */

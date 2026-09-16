@@ -9,6 +9,11 @@
  *    并在真机验收清单里列为必测项。
  */
 
+import { readText, writeTextChecked } from './plusio.js'
+
+/** 照片目录（App 私有目录下），文本照片存在这里 */
+export const PHOTO_DIR = '_doc/food'
+
 function guessMime(path) {
 	const p = String(path || '').toLowerCase()
 	if (p.indexOf('.png') >= 0) return 'image/png'
@@ -211,76 +216,93 @@ export async function toBase64(path, file) {
  * 把临时图片复制到 App 私有目录，返回可用于 <image src> 的路径。
  * H5 无长期文件系统，直接返回失败（照片不持久化）。
  */
-export function persistPhoto(tempPath) {
+/**
+ * 把图片落盘。
+ *
+ * ⚠️ 这里是「照片一直丢失」的根因所在，改法说明：
+ *
+ * 原实现用 plus.io 的 entry.copyTo 把相机临时文件拷进私有目录。
+ * 真机上 copyTo 跨文件系统会**静默失败**（不报错、目标文件不存在），
+ * 于是照片从来没落盘、界面上的「照片已丢失」其实是真的。
+ * 更早还试过 Native.js 写二进制、Files.copy —— 自检报告证明这台设备上
+ * 所有 Native.js 写入都是「不报错但 0 字节」。
+ *
+ * 自检里唯一**被证明真的能写进去**的是 plus.io 的 FileWriter.write(String)。
+ * 所以照片改成存 base64 文本（.b64），配一次写入大小核对：
+ *   - 不依赖 copyTo / plus.zip / Native.js
+ *   - 写没写成功当场就知道，不再有静默失败
+ *   - 备份时直接把这段文本塞进 JSON，不需要打包照片文件
+ *
+ * 代价是文件比原图大约 1/3，换来的是「确实存在」。
+ */
+export async function persistPhoto(tempPath) {
+	if (typeof plus === 'undefined' || !plus || !plus.io || !plus.io.PRIVATE_DOC) {
+		return { ok: false, path: '', error: '当前平台不支持保存照片' }
+	}
+	const r = await toBase64(tempPath)
+	if (!r.ok) return { ok: false, path: '', error: r.error || '读取图片失败' }
+
+	const name = `food_${Date.now()}.b64`
+	return writePhotoBase64(name, r.base64)
+}
+
+/** 把一段 base64 写成照片文件，并核对大小 */
+export async function writePhotoBase64(name, base64) {
+	const dir = await ensurePhotoDir()
+	if (!dir.ok) return { ok: false, path: '', error: dir.error }
+	const url = `${PHOTO_DIR}/${name}`
+	const w = await writeTextChecked(url, base64)
+	if (!w.ok) return { ok: false, path: '', error: '保存照片失败：' + w.error }
+	return { ok: true, path: url, bytes: w.bytes }
+}
+
+function ensurePhotoDir() {
 	return new Promise((resolve) => {
-		if (typeof plus === 'undefined' || !plus || !plus.io || !plus.io.requestFileSystem) {
-			resolve({ ok: false, path: '', error: '当前平台不支持保存照片' })
-			return
-		}
-		plus.io.resolveLocalFileSystemURL(
-			tempPath,
-			(entry) => {
-				plus.io.requestFileSystem(
-					plus.io.PRIVATE_DOC,
-					(fs) => {
-						fs.root.getDirectory(
-							'food',
-							{ create: true },
-							(dir) => {
-								const name = `food_${Date.now()}.jpg`
-								entry.copyTo(
-									dir,
-									name,
-									() => resolve({ ok: true, path: `_doc/food/${name}` }),
-									() => {
-										// copyTo 在真机上会跨文件系统失败（照片因此一直没被存下来），
-										// 退回用 plus.zip 做一次原生复制：压缩 → 解压到目标目录
-										fallbackCopy(tempPath, name).then(resolve)
-									}
-								)
-							},
-							() => resolve({ ok: false, path: '', error: '无法创建照片目录' })
-						)
-					},
-					() => resolve({ ok: false, path: '', error: '无法访问应用目录' })
+		plus.io.requestFileSystem(
+			plus.io.PRIVATE_DOC,
+			(fs) => {
+				fs.root.getDirectory(
+					'food',
+					{ create: true },
+					() => resolve({ ok: true }),
+					() => resolve({ ok: false, error: '无法创建照片目录' })
 				)
 			},
-			() => resolve({ ok: false, path: '', error: '找不到源图片' })
+			() => resolve({ ok: false, error: '无法访问应用目录' })
 		)
 	})
 }
 
 /**
- * 用 plus.zip 做原生文件复制：压缩源文件 → 解压到 _doc/food/。
- * 不依赖 entry.copyTo（它跨文件系统会失败），也不经过 JS 桥。
+ * 读回照片的 base64（.b64 文本文件）。
+ * @returns {Promise<{ok:boolean, base64?:string, error?:string}>}
  */
-function fallbackCopy(tempPath, name) {
-	return new Promise((resolve) => {
-		if (!plus.zip || typeof plus.zip.compress !== 'function') {
-			resolve({ ok: false, path: '', error: '复制照片失败（plus.zip 不可用）' })
-			return
-		}
-		const tmpZip = `_doc/ccphoto-${Date.now()}.zip`
-		const toAbs = (u) => plus.io.convertLocalFileSystemURL(u)
-		plus.zip.compress(
-			toAbs(tempPath),
-			toAbs(tmpZip),
-			() => {
-				plus.zip.decompress(
-					toAbs(tmpZip),
-					toAbs('_doc/food/'),
-					() => {
-						plus.io.resolveLocalFileSystemURL(toAbs(tmpZip), (z) => z.remove(() => {}, () => {}), () => {})
-						resolve({ ok: true, path: `_doc/food/${name}` })
-					},
-					(e) =>
-						resolve({ ok: false, path: '', error: '解压照片失败：' + ((e && e.message) || e) })
-				)
-			},
-			(e) => resolve({ ok: false, path: '', error: '压缩照片失败：' + ((e && e.message) || e) })
-		)
-	})
+export async function readPhotoBase64(path) {
+	const p = String(path || '')
+	if (!p) return { ok: false, error: '没有照片路径' }
+	if (/^data:/i.test(p)) return { ok: true, base64: splitDataUrl(p).base64 }
+	const r = await readText(p)
+	if (!r.ok) return { ok: false, error: r.error }
+	const text = String(r.text || '').trim()
+	if (!text) return { ok: false, error: '照片文件是空的' }
+	return { ok: true, base64: text }
 }
+
+/**
+ * 照片路径 → 可直接给 <image src> 用的 data URL。
+ * 用于 .b64 文本照片；读不到返回空字符串（调用方显示「已丢失」）。
+ */
+export async function photoDataUrl(path) {
+	const r = await readPhotoBase64(path)
+	if (!r.ok || !r.base64) return { ok: false, error: r.error }
+	return { ok: true, url: `data:image/jpeg;base64,${r.base64}` }
+}
+
+/** 文本照片（.b64）需要异步读出才能显示；普通文件路径同步转换即可 */
+export function isTextPhoto(path) {
+	return /\.b64$/i.test(String(path || ''))
+}
+
 function byUniRemove(path) {
 	if (typeof uni !== 'undefined' && uni && typeof uni.removeSavedFile === 'function') {
 		uni.removeSavedFile({ filePath: path, fail: () => {} })

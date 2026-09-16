@@ -1,21 +1,17 @@
 /**
- * 只用 plus.io + plus.zip 的文件操作
+ * 只用 plus.io 的文件操作
  *
- * 为什么单独一个模块：真机自检证明 **Native.js 的写入在这台设备上全部失败** ——
- * RandomAccessFile.writeBytes、Files.writeString、Files.copy(Path,Path)、
- * MediaStore 的输出流写入，全都是「不报错但 0 字节」。
- * 而 plus.io 的 FileWriter.write(String) 是唯一能真正写进去的。
+ * 真机自检证明：**这台设备上只有 plus.io 的文本写入是真的能写进去的**。
+ * Native.js 的各类写入（RandomAccessFile.writeBytes、Files.writeString、
+ * Files.copy、MediaStore 输出流）全是「不报错但 0 字节」；
+ * plus.io 自己的 entry.copyTo 也会静默失败。
  *
- * 所以备份链路完全绕开 Native.js：
- *   写文本   → plus.io FileWriter.write(String)
- *   读回来   → plus.io FileReader.readAsDataURL → base64
- *   拷文件   → entry.copyTo
- *   建目录   → getDirectory({create:true})
- *   打包     → plus.zip.compress（原生，字节根本不过 JS）
- *   解包     → plus.zip.decompress
- *   找备份   → DirectoryReader 列目录
+ * 所以整条链路只用两个动作：
+ *   写 → FileWriter.write(String)（分块，写完回查字节数）
+ *   读 → FileReader.readAsText（读文本）/ readAsDataURL（读二进制）
  *
- * 这一切都不需要把字节传过 Native.js 桥 —— 那正是问题所在。
+ * 照片存成 base64 文本、备份是一个 JSON 文本，都是为了只用这两个动作。
+ * 每个写入都会核对大小 —— 「写完不知道成没成」是之前所有坑的根源。
  */
 
 /** 输出目录候选，按「用户越容易看到」排序 */
@@ -24,6 +20,8 @@ const OUT_DIRS = [
 	{ url: '_documents', label: '文档' },
 	{ url: '_doc', label: '应用私有目录' },
 ]
+
+import { utf8Length } from './utf8.js'
 
 export function hasPlusIo() {
 	return (
@@ -60,16 +58,33 @@ export function isUserVisible(absPath) {
  * 都不可见就退回私有目录，并标记出来让界面提示用户。
  * @returns {{url:string, abs:string, label:string, visible:boolean}}
  */
-export function resolveOutDir() {
-	let fallback = null
+/**
+ * 候选输出目录（用户可见的排前面）。每个都试着建出来，建不成的不算。
+ * 只探测一次：探测本身要建目录，每次操作都来一遍没必要。
+ */
+let _outDirs = null
+export async function outDirCandidates() {
+	if (_outDirs) return _outDirs
+	const out = []
 	for (const d of OUT_DIRS) {
-		const abs = absOf(d.url)
-		if (!abs) continue
-		const item = { url: d.url, abs, label: d.label, visible: isUserVisible(abs) }
-		if (item.visible) return item
-		if (!fallback) fallback = item
+		const m = await mkdir(d.url)
+		if (!m.ok) continue
+		out.push({ ...d, visible: isUserVisible(absOf(d.url)) })
 	}
-	return fallback || { url: '_doc', abs: absOf('_doc'), label: '应用私有目录', visible: false }
+	out.sort((a, b) => (a.visible === b.visible ? 0 : a.visible ? -1 : 1))
+	_outDirs = out.length ? out : [{ url: '_doc', label: '应用私有目录', visible: false }]
+	return _outDirs
+}
+
+/** 测试用：清掉目录缓存 */
+export function _resetOutDirs() {
+	_outDirs = null
+}
+
+/** 首选输出目录 */
+export async function resolveOutDir() {
+	const list = await outDirCandidates()
+	return { ...list[0], abs: absOf(list[0].url) }
 }
 
 /** 取一个文件名（带目录的本地 URL → 末段） */
@@ -119,7 +134,20 @@ export function mkdir(localUrl) {
 }
 
 /** 写一个文本文件（plus.io 是唯一验证过能真正写进去的路径） */
-export function writeText(localUrl, text) {
+/** 单次 write 的最大字符数。过桥参数有长度限制（Native.js 约 4KB），
+ *  plus.io 没有官方说明，所以不赌 —— 分块写，每块都回查。 */
+export const WRITE_CHUNK = 64 * 1024
+
+/**
+ * 写文本文件（分块 + 回查大小）。
+ *
+ * 真机上唯一被验证过「真的写进去了」的路径就是 plus.io 的
+ * FileWriter.write(String)。但一次写几十万字符是否可靠没有官方说法，
+ * 所以切成小块顺序写，写完再核对字节数 —— 对不上就报失败，
+ * 绝不返回「看起来成功」。
+ */
+export function writeText(localUrl, text, opts = {}) {
+	const chunk = Number(opts.chunk) || WRITE_CHUNK
 	return new Promise((resolve) => {
 		if (!hasPlusIo()) {
 			resolve({ ok: false, error: 'plus.io 不可用' })
@@ -127,9 +155,10 @@ export function writeText(localUrl, text) {
 		}
 		const abs = absOf(localUrl)
 		if (!abs) {
-			resolve({ ok: false, error: '文件路径解析失败' })
+			resolve({ ok: false, error: '文件路径解析失败：' + localUrl })
 			return
 		}
+		const full = String(text)
 		try {
 			plus.io.requestFileSystem(
 				plus.io.PRIVATE_DOC,
@@ -140,13 +169,40 @@ export function writeText(localUrl, text) {
 						(entry) => {
 							entry.createWriter(
 								(w) => {
-									w.onwrite = () => resolve({ ok: true, abs })
-									w.onerror = () => resolve({ ok: false, error: '写入失败' })
-									try {
-										w.write(String(text))
-									} catch (e) {
-										resolve({ ok: false, error: 'write 异常：' + ((e && e.message) || e) })
+									let at = 0
+									let parts = 0
+									const step = () => {
+										if (at >= full.length) {
+											resolve({ ok: true, abs, chars: full.length, parts })
+											return
+										}
+										const piece = full.slice(at, at + chunk)
+										at += piece.length
+										parts++
+										w.onwrite = step
+										w.onerror = (e) =>
+											resolve({
+												ok: false,
+												error: `写入第 ${parts} 段失败：` + ((e && e.message) || e),
+												written: at - piece.length,
+											})
+										try {
+											w.write(piece)
+										} catch (e) {
+											resolve({
+												ok: false,
+												error: 'write 异常：' + ((e && e.message) || e),
+											})
+										}
 									}
+									// 文件已存在时，先截断，否则新内容比旧内容短会留下尾巴
+									try {
+										if (typeof w.seek === 'function') w.seek(0)
+										if (typeof w.truncate === 'function') w.truncate(0)
+									} catch (e) {
+										/* 不支持就算了，靠最终大小核对兜住 */
+									}
+									step()
 								},
 								(e) => resolve({ ok: false, error: '创建写入器失败：' + ((e && e.message) || e) })
 							)
@@ -162,6 +218,69 @@ export function writeText(localUrl, text) {
 	})
 }
 
+/**
+ * 写文本并核对大小。base64 / JSON 都是纯 ASCII，字符数就是字节数。
+ * @returns {Promise<{ok:boolean, abs?:string, bytes?:number, error?:string}>}
+ */
+export async function writeTextChecked(localUrl, text) {
+	const full = String(text)
+	const w = await writeText(localUrl, full)
+	if (!w.ok) return w
+	const want = utf8Length(full)
+	const size = await fileSize(localUrl)
+	if (size !== want) {
+		return {
+			ok: false,
+			error: `写入大小不对：写进去 ${size} 字节，期望 ${want}。可能没写完整。`,
+			abs: w.abs,
+		}
+	}
+	return { ok: true, abs: w.abs, bytes: size }
+}
+
+/**
+ * 读文本文件。
+ *
+ * ⚠️ 必须用 readAsText，不能用 readAsDataURL 再截逗号后面：
+ *    .b64 照片文件的**内容**本身就是 base64 文本，
+ *    用 readAsDataURL 读会把这段文本再 base64 一次（双重编码），
+ *    照片就永远显示不出来。这个坑是测试逮出来的。
+ */
+export function readText(localUrl) {
+	return new Promise((resolve) => {
+		if (!hasPlusIo()) {
+			resolve({ ok: false, error: 'plus.io 不可用' })
+			return
+		}
+		const abs = absOf(localUrl)
+		if (!abs) {
+			resolve({ ok: false, error: '文件路径解析失败' })
+			return
+		}
+		try {
+			plus.io.resolveLocalFileSystemURL(
+				abs,
+				(entry) => {
+					entry.file(
+						(file) => {
+							const reader = new plus.io.FileReader()
+							reader.onloadend = (e) => {
+								const s = (e && e.target && e.target.result) || ''
+								resolve({ ok: true, text: String(s), size: file.size })
+							}
+							reader.onerror = () => resolve({ ok: false, error: 'FileReader 出错（文件可能太大）' })
+							reader.readAsText(file)
+						},
+						() => resolve({ ok: false, error: 'entry.file 失败' })
+					)
+				},
+				() => resolve({ ok: false, error: '文件不存在或解析不到' })
+			)
+		} catch (e) {
+			resolve({ ok: false, error: String((e && e.message) || e) })
+		}
+	})
+}
 /** 读文件为 base64（plus.io FileReader → dataURL） */
 export function readBase64(localUrl) {
 	return new Promise((resolve) => {
@@ -253,52 +372,6 @@ export function remove(localUrl) {
 }
 
 /** 复制文件（plus.io 原生拷贝，字节不过 JS） */
-export function copyFile(fromUrl, toUrl) {
-	return new Promise((resolve) => {
-		if (!hasPlusIo()) {
-			resolve({ ok: false, error: 'plus.io 不可用' })
-			return
-		}
-		const fromAbs = absOf(fromUrl)
-		const toAbs = absOf(toUrl)
-		if (!fromAbs || !toAbs) {
-			resolve({ ok: false, error: '路径解析失败' })
-			return
-		}
-		const to = splitUrl(toAbs)
-		try {
-			plus.io.requestFileSystem(
-				plus.io.PRIVATE_DOC,
-				(fs) => {
-					fs.root.getDirectory(
-						to.dir,
-						{ create: true, exclusive: false },
-						(dir) => {
-							plus.io.resolveLocalFileSystemURL(
-								fromAbs,
-								(entry) => {
-									entry.copyTo(
-										dir,
-										to.name,
-										() => resolve({ ok: true, abs: toAbs }),
-										(e) => resolve({ ok: false, error: '复制失败：' + ((e && e.message) || e) })
-									)
-								},
-								() => resolve({ ok: false, error: '源文件不存在' })
-							)
-						},
-						() => resolve({ ok: false, error: '目标目录不可用' })
-					)
-				},
-				() => resolve({ ok: false, error: '无法访问文件系统' })
-			)
-		} catch (e) {
-			resolve({ ok: false, error: String((e && e.message) || e) })
-		}
-	})
-}
-
-/** 列目录，返回文件名数组 */
 export function listDir(localUrl) {
 	return new Promise((resolve) => {
 		if (!hasPlusIo()) {
@@ -340,175 +413,19 @@ export function listDir(localUrl) {
 }
 
 /** zip 是否可用 */
-export function hasZip() {
-	return typeof plus !== 'undefined' && !!(plus && plus.zip && plus.zip.compress)
-}
-
 /**
- * 压缩：plus.zip.compress（纯原生，字节不过 JS 桥）。
- * @param {string} srcLocal  源文件或目录的 plus.io 本地 URL（多个用逗号分隔）
- * @param {string} zipLocal  输出 zip 的本地 URL
+ * 列出某个目录里符合前缀的文件。
+ * 早先这里写死了遍历 OUT_DIRS 而忽略传入的目录参数 —— 结果导入时
+ * 永远找不到刚导出的备份。测试逮出来的。
  */
-export function zipCompress(srcLocal, zipLocal) {
-	return new Promise((resolve) => {
-		if (!hasZip()) {
-			resolve({ ok: false, error: 'plus.zip 不可用（需在 HBuilderX 勾 Zip 模块）' })
-			return
-		}
-		const srcAbs = absOf(srcLocal)
-		const zipAbs = absOf(zipLocal)
-		if (!srcAbs || !zipAbs) {
-			resolve({ ok: false, error: '路径解析失败' })
-			return
-		}
-		try {
-			plus.zip.compress(
-				srcAbs,
-				zipAbs,
-				() => resolve({ ok: true, abs: zipAbs }),
-				(e) => resolve({ ok: false, error: '压缩失败：' + ((e && e.message) || e) })
-			)
-		} catch (e) {
-			resolve({ ok: false, error: String((e && e.message) || e) })
-		}
-	})
-}
-
-/** 解压：plus.zip.decompress */
-export function zipDecompress(zipLocal, destLocal) {
-	return new Promise((resolve) => {
-		if (!hasZip()) {
-			resolve({ ok: false, error: 'plus.zip 不可用' })
-			return
-		}
-		const zipAbs = absOf(zipLocal)
-		const destAbs = absOf(destLocal)
-		if (!zipAbs || !destAbs) {
-			resolve({ ok: false, error: '路径解析失败' })
-			return
-		}
-		if (typeof plus.zip.decompress !== 'function') {
-			resolve({ ok: false, error: 'plus.zip.decompress 不可用' })
-			return
-		}
-		try {
-			plus.zip.decompress(
-				zipAbs,
-				destAbs,
-				() => resolve({ ok: true, abs: destAbs }),
-				(e) => resolve({ ok: false, error: '解压失败：' + ((e && e.message) || e) })
-			)
-		} catch (e) {
-			resolve({ ok: false, error: String((e && e.message) || e) })
-		}
-	})
-}
-
-/**
- * 多个路径一起压缩（plus.zip 的 src 支持逗号分隔多个路径）。
- *
- * 为什么不用「先 copyTo 到临时目录再压目录」：真机上 plus.io 的
- * copyTo 跨文件系统会失败（照片一直没被存下来就是这个原因），
- * 所以干脆不拷 —— 直接把原始文件列表交给 plus.zip。
- */
-export function zipCompressMany(localUrls, zipLocal) {
-	return new Promise((resolve) => {
-		if (!hasZip()) {
-			resolve({ ok: false, error: 'plus.zip 不可用（需在 HBuilderX 勾 Zip 模块）' })
-			return
-		}
-		const absList = []
-		for (const u of localUrls) {
-			const a = absOf(u)
-			if (!a) {
-				resolve({ ok: false, error: `路径解析失败：${u}` })
-				return
-			}
-			absList.push(a)
-		}
-		const zipAbs = absOf(zipLocal)
-		if (!zipAbs) {
-			resolve({ ok: false, error: '输出路径解析失败' })
-			return
-		}
-		try {
-			plus.zip.compress(
-				absList.join(','),
-				zipAbs,
-				() => resolve({ ok: true, abs: zipAbs }),
-				(e) => resolve({ ok: false, error: '压缩失败：' + ((e && e.message) || e) })
-			)
-		} catch (e) {
-			resolve({ ok: false, error: String((e && e.message) || e) })
-		}
-	})
-}
-
-/**
- * 递归列出目录下的所有文件。
- * zip 解出来的目录结构由 plus.zip 决定（可能带一层目录，也可能平铺），
- * 所以导入端不能假设布局 —— 递归找，看到什么算什么。
- * @returns {Promise<{ok:boolean, files:Array<{name:string, rel:string, url:string, size:number}>}>}
- */
-export async function walkDir(localUrl, maxDepth = 3) {
+export async function findBackups(localUrl, prefix = 'calorie-backup') {
+	const r = await listDir(localUrl)
+	if (!r.ok) return []
 	const out = []
-	async function step(url, depth) {
-		if (depth > maxDepth) return
-		const r = await listDir(url)
-		if (!r.ok) return
-		for (const item of r.names) {
-			if (item.isFile) {
-				const size = await fileSize(item.url)
-				out.push({
-					name: item.name,
-					rel: item.url.slice(String(localUrl).length).replace(/^\//, ''),
-					url: item.url,
-					size,
-				})
-			} else {
-				await step(item.url, depth + 1)
-			}
-		}
-	}
-	await step(localUrl, 1)
-	return { ok: true, files: out }
-}
-
-/**
- * 用 plus.zip 做一次「原生复制」：压缩 → 解压到目标目录。
- *
- * 为什么不用 entry.copyTo：真机上它跨文件系统会失败。
- * 而 compress/decompress 是纯原生的，不关心文件系统边界。
- */
-export async function copyViaZip(fromUrl, destDirUrl, name) {
-	const tmpZip = `_doc/cccopy-${Date.now()}.zip`
-	const z = await zipCompress(fromUrl, tmpZip)
-	if (!z.ok) return { ok: false, error: z.error }
-	const d = await zipDecompress(tmpZip, destDirUrl)
-	await remove(tmpZip)
-	if (!d.ok) return { ok: false, error: d.error }
-	// 解出来的文件名由 compress 决定，通常就是原文件名
-	const list = await listDir(destDirUrl)
-	const hit =
-		list.ok &&
-		list.names.find((x) => x.isFile && (x.name === name || x.name === nameOf(fromUrl)))
-	if (!hit) {
-		return { ok: false, error: '解压后没找到文件', extracted: list.ok ? list.names.map((x) => x.name) : [] }
-	}
-	return { ok: true, url: hit.url }
-}
-
-/** 列出候选目录里符合前缀的文件（导入时找备份用） */
-export async function findBackups(prefix = 'calorie-backup') {
-	const out = []
-	for (const d of OUT_DIRS) {
-		const r = await listDir(d.url)
-		if (!r.ok) continue
-		for (const f of r.names) {
-			if (!f.isFile) continue
-			if (f.name.indexOf(prefix) !== 0) continue
-			out.push({ ...f, dir: d.url, dirLabel: d.label })
-		}
+	for (const f of r.names) {
+		if (!f.isFile) continue
+		if (f.name.indexOf(prefix) !== 0) continue
+		out.push(f)
 	}
 	return out
 }

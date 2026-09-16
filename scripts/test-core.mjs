@@ -63,7 +63,7 @@ import { DEFAULT_DAILY_GOAL } from '../src/core/constants.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { crc32, zipChunks, readZip, base64ToBytes, bytesToBase64 } from '../src/core/zip.js'
+import { base64ToBytes, bytesToBase64 } from '../src/core/base64.js'
 import {
 	saveSnapshot,
 	listSnapshots,
@@ -1058,313 +1058,191 @@ eq(isAndroid(), false, '没有 plus 时 isAndroid 为 false')
 
 eq((await saveToDownloads('x', 'y.json')).unsupported, true, '没有 plus 时直接标不支持')
 
-/* ========== zip 引擎 ========== */
-
-/** 把异步 chunk 迭代器收成一个 Uint8Array */
-async function collectZip(gen) {
-	const list = []
-	let len = 0
-	for await (const c of gen) {
-		list.push(c)
-		len += c.length
-	}
-	const out = new Uint8Array(len)
-	let at = 0
-	for (const c of list) {
-		out.set(c, at)
-		at += c.length
-	}
-	return out
-}
-
 const bytesOfText = (s) => new Uint8Array(Buffer.from(s, 'utf8'))
 
 // 包含全部 256 种字节值，能真正验出二进制是否被篡改
 const BINARY = new Uint8Array(1024)
 for (let i = 0; i < BINARY.length; i++) BINARY[i] = i & 0xff
 
-group('zip.js · CRC32')
-	eq(crc32(bytesOfText('123456789')), 0xcbf43926, 'CRC32 标准校验值（123456789 → CBF43926）')
-eq(crc32(new Uint8Array(0)), 0, '空数据 CRC 为 0')
-eq(crc32(bytesOfText('a')) === crc32(bytesOfText('b')), false, '不同内容 CRC 不同')
-
-group('zip.js · base64 互转')
-
-eq(bytesToBase64(new Uint8Array([0, 0, 0])), 'AAAA', '全 0 字节编码正确')
-eq([...base64ToBytes('AAAA')].join(','), '0,0,0', '解码回全 0')
-eq(
-	[...base64ToBytes(bytesToBase64(BINARY))].join(','),
-	[...BINARY].join(','),
-	'二进制 base64 往返无损（1024 字节全字节值）'
-)
-eq(bytesToBase64(new Uint8Array([255])), '/w==', '单字节补位正确')
-
-eq(base64ToBytes('').length, 0, '空字符串解码为空')
-
-group('zip.js · 写入与回读')
-
-const files = [
-	{ name: 'backup.json', data: bytesOfText('{"app":"calorie-counting"}') },
-	{ name: 'photos/food_1.jpg', data: BINARY },
-	{ name: 'photos/food_2.jpg', data: bytesOfText('tiny') },
-]
-const zipBytes = await collectZip(
-	zipChunks(
-		files.map((f) => ({ name: f.name, read: async () => f.data })),
-		{ now: T(2026, 9, 16, 12, 0) }
-	)
-)
-ok(zipBytes.length > 100, `生成了 ${zipBytes.length} 字节的 zip`)
-eq([zipBytes[0], zipBytes[1], zipBytes[2], zipBytes[3]].join(','), '80,75,3,4', '以 PK\x03\x04 开头')
-
-const back = readZip(zipBytes)
-eq(back.ok, true, '回读成功')
-eq(back.entries.length, 3, '条目数对')
-eq(back.entries.map((e) => e.name).join(','), 'backup.json,photos/food_1.jpg,photos/food_2.jpg', '条目名与顺序对')
-eq(
-	new TextDecoder().decode(back.entries[0].bytes),
-	'{"app":"calorie-counting"}',
-	'文本条目内容对'
-)
-eq(
-	[...back.entries[1].bytes].join(','),
-	[...BINARY].join(','),
-	'★ 二进制条目逐字节一致（没被编码弄坏）'
-)
-
-group('zip.js · 与真实解压工具的互操作性')
-
-const tmpDir = path.resolve('node_modules/.cache/ziptest')
-fs.rmSync(tmpDir, { recursive: true, force: true })
-fs.mkdirSync(tmpDir, { recursive: true })
-const zipPath = path.join(tmpDir, 'backup.zip')
-fs.writeFileSync(zipPath, Buffer.from(zipBytes))
-
-if (process.platform === 'win32') {
-	let okExpand = true
-	try {
-		execFileSync(
-			'powershell',
-			[
-				'-NoProfile',
-				'-NonInteractive',
-				'-Command',
-				`Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${path.join(tmpDir, 'out')}' -Force`,
-			],
-			{ stdio: 'ignore', timeout: 60000 }
-		)
-	} catch (e) {
-		okExpand = false
-	}
-	eq(okExpand, true, '★ PowerShell Expand-Archive 能解压本模块生成的 zip')
-	if (okExpand) {
-		const jsonOut = fs.readFileSync(path.join(tmpDir, 'out', 'backup.json'), 'utf8')
-		eq(jsonOut, '{"app":"calorie-counting"}', '★ 解压出来的 JSON 内容一致')
-		const binOut = fs.readFileSync(path.join(tmpDir, 'out', 'photos', 'food_1.jpg'))
-		eq(binOut.length, BINARY.length, '★ 解压出来的照片字节数一致')
-		eq(
-			binOut.equals(Buffer.from(BINARY)),
-			true,
-			'★ 解压出来的照片逐字节一致（真实的 zip 工具认这个格式）'
-		)
-	} else {
-		console.log('    （Expand-Archive 不可用，跳过互操作性验证）')
-	}
-} else {
-	console.log('    （非 Windows，跳过 Expand-Archive 互操作性验证）')
-}
-fs.rmSync(tmpDir, { recursive: true, force: true })
-
-group('zip.js · 坏文件要报得看得懂')
-
-eq(readZip(bytesOfText('这不是 zip')).error.indexOf('太小') >= 0, true, '太小 → 明确报错')
-eq(
-	readZip(new Uint8Array(100)).error.indexOf('找不到') >= 0,
-	true,
-	'没有结尾标记 → 明确报错'
-)
-
-eq(
-	readZip(zipBytes.subarray(0, zipBytes.length - 30)).ok,
-	false,
-	'被截断的 zip 不会被当成好的'
-)
-// 把压缩方式改成 8（deflate），应该明确报错而不是给出乱码
-const deflated = zipBytes.slice()
-for (let i = 0; i < deflated.length - 4; i++) {
-	if (deflated[i] === 0x50 && deflated[i + 1] === 0x4b && deflated[i + 2] === 0x01 && deflated[i + 3] === 0x02) {
-		deflated[i + 10] = 8 // 中央目录里的压缩方式改成 deflate
-		break
+/** 造一条记录（照片字段由参数给） */
+function recWith(id, photo, items) {
+	return {
+		id,
+		ts: T(2026, 9, 16, 8, 0) + Number(String(id).replace(/\D/g, '') || 0) * 60000,
+		date: '2026-09-16',
+		meal: 'breakfast',
+		mealAuto: true,
+		items: items || [{ name: '米饭', grams: 200, per100: { kcal: 116, protein: 2.6, fat: 0.3, carbs: 25.9 } }],
+		photo: photo || '',
+		note: '',
+		source: 'manual',
+		createdAt: T(2026, 9, 16, 8, 0),
+		updatedAt: T(2026, 9, 16, 8, 0),
 	}
 }
-const dz = readZip(deflated)
-eq(dz.ok, false, 'deflate 条目 → 拒绝')
-ok(
-	String(dz.error).indexOf('重新打包') >= 0,
-	`★ 告诉用户「不要用别的工具重新打包」：${dz.error}`
-)
 
-/* ========== 完整备份（记录 + 照片） ========== */
+/** exportAll() 形状的 payload */
+function fullPayloadOf(records) {
+	return {
+		records,
+		settings: { dailyGoal: 1800, apiKey: 'sk-test' },
+		exportedAt: T(2026, 9, 16, 18, 0),
+	}
+}
+
+/**
+ * 假的「磁盘上的照片」：路径 → base64 内容。
+ * 真机上 readPhotoBase64 对 .b64 文本文件读到的是文本本身，
+ * 对老的 .jpg 文件读到的是那个 JPEG 的 base64 —— 两者都是「文件在就有的读」。
+ */
+const PHOTOS = {
+	'_doc/food/food_1.jpg': 'AAAA',
+	'/storage/emulated/0/Android/data/x/doc/food/food_2.jpg': 'BBBB',
+}
+
+/** 读一张照片（文件不在就返回 null，跟真机一致） */
+function photoReaderOf(map) {
+	return async (path) => map[path] || null
+}
 
 const FB = await import('../src/core/fullbackup.js')
 
-// 造一张假照片：字节内容可识别，方便验证有没有被弄坏
-const fakePhoto = (n) => {
-	const b = new Uint8Array(512)
-	for (let i = 0; i < b.length; i++) b[i] = (i * n) & 0xff
-	return b
-}
-
-const PHOTOS = {
-	'_doc/food/food_1.jpg': fakePhoto(1),
-	'/storage/emulated/0/Android/data/x/doc/food/food_2.jpg': fakePhoto(2),
-}
-
-const recWith = (id, photo, extra) => ({
-	id,
-	ts: T(2026, 9, 16, 12, 0),
-	date: '2026-09-16',
-	meal: 'lunch',
-	mealAuto: true,
-	items: [{ name: '米饭', grams: 200, per100: { kcal: 116, protein: 2.6, fat: 0.3, carbs: 25.9 } }],
-	photo,
-	note: '',
-	source: 'ai',
-	createdAt: T(2026, 9, 16, 12, 0),
-	updatedAt: T(2026, 9, 16, 12, 0),
-	...(extra || {}),
-})
-
-const fullPayloadOf = (records) => ({
-	app: 'calorie-counting',
-	schemaVersion: 1,
-	exportedAt: T(2026, 9, 16, 18, 0),
-	settings: { dailyGoal: 1800 },
-	records,
-})
-
-/** 从记录集打出完整备份 zip */
-async function buildZip(payload, photoMap, stats) {
-	const { entries, stats: s } = FB.fullBackupEntries(
-		payload,
-		async (p) => (photoMap && photoMap[p] ? photoMap[p] : null),
-		stats
-	)
-	const zip = await collectZip(zipChunks(entries, { now: T(2026, 9, 16, 18, 0) }))
-	return { zip, stats: s }
-}
-
-group('fullbackup.js · 路径处理')
+group('fullbackup.js · 照片命名与去重')
 
 eq(FB.basename('_doc/food/a.jpg'), 'a.jpg', '本地 URL 取文件名')
 eq(FB.basename('/storage/emulated/0/x/food/b.jpg'), 'b.jpg', '原生绝对路径取文件名')
 eq(FB.basename('c.jpg'), 'c.jpg', '无目录时原样返回')
 eq(FB.basename(''), '', '空值不报错')
+
+eq(FB.photoNameOf('_doc/food/food_1.jpg'), 'food_1.b64', '★ .jpg 统一成 .b64（磁盘上照片是 base64 文本）')
+eq(FB.photoNameOf('_doc/food/food_1.b64'), 'food_1.b64', '已经是 .b64 就不动')
+eq(FB.photoNameOf('data:image/jpeg;base64,AAAA', 3), 'photo_3.b64', 'data URL 没有文件名，用序号')
+eq(FB.photoNameOf(''), '', '空路径 → 空名字')
+
 eq(
-	FB.photoPathsOf([recWith('a', '_doc/food/x.jpg'), recWith('b', '_doc/food/x.jpg'), recWith('c', '')])
-		.length,
+	FB.photoNamesOf([
+		recWith('r1', '_doc/food/x.jpg'),
+		recWith('r2', '_doc/food/x.b64'),
+		recWith('r3', ''),
+	]).length,
 	1,
-	'照片路径去重'
+	'同一张照片（只是扩展名写法不同）只算一次'
 )
 
-group('fullbackup.js · 导出：路径改写与缺失处理')
+group('fullbackup.js · 打包：照片进 JSON，缺的不假装')
 
 const payload1 = fullPayloadOf([
 	recWith('r1', '_doc/food/food_1.jpg'),
 	recWith('r2', '/storage/emulated/0/Android/data/x/doc/food/food_2.jpg'),
 	recWith('r3', ''),
 ])
-const out1 = await buildZip(payload1, PHOTOS)
+const packed1 = await FB.packPayload(payload1, photoReaderOf(PHOTOS))
 
-eq(out1.stats.photos, 2, '打包进 2 张照片')
-eq(out1.stats.missing.length, 0, '没有缺失')
-eq(out1.stats.planned, 2, '规划了 2 张')
-
-const rz1 = readZip(out1.zip)
-eq(rz1.ok, true, '生成的 zip 可读')
+eq(packed1.stats.records, 3, '记录数对')
+eq(packed1.stats.photos, 2, '★ 两张照片都被读出来塞进 payload')
+eq(packed1.stats.missing.length, 0, '没有缺失')
+eq(packed1.payload.format, 'cc-full-backup', '带格式标记（以后好认）')
+eq(packed1.payload.photos.length, 2, 'payload 里有照片数组')
+eq(packed1.payload.photos[0].name, 'food_1.b64', '照片名字规范化')
+eq(packed1.payload.photos[0].base64, 'AAAA', '★ 照片内容是 base64 文本')
 eq(
-	rz1.entries.map((e) => e.name).join(','),
-	'backup.json,photos/food_1.jpg,photos/food_2.jpg',
-	'zip 结构正确'
+	packed1.payload.records.map((r) => r.photo).join('|'),
+	'food_1.b64|food_2.b64|',
+	'★ 记录里的 photo 变成照片名字（不带路径，这样才可移植）'
 )
-const man1 = JSON.parse(new TextDecoder().decode(rz1.entries[0].bytes))
-eq(
-	man1.records.map((r) => r.photo).join('|'),
-	'photos/food_1.jpg|photos/food_2.jpg|',
-	'★ 导出的 JSON 里照片路径已改成 zip 内相对路径（这样才可移植）'
-)
-eq(man1.records[1].items[0].name, '米饭', '记录内容原封不动')
-eq(man1.settings.dailyGoal, 1800, '设置一起带走')
+eq(packed1.payload.records[1].items[0].name, '米饭', '记录内容原封不动')
+eq(packed1.payload.settings.dailyGoal, 1800, '设置一起带走')
 
 // 照片文件已经丢了的情况
-const out2 = await buildZip(
+const packed2 = await FB.packPayload(
 	fullPayloadOf([recWith('r1', '_doc/food/food_1.jpg'), recWith('r2', '_doc/food/food_gone.jpg')]),
-	PHOTOS
+	photoReaderOf(PHOTOS)
 )
-eq(out2.stats.photos, 1, '只打进存在的那张')
-eq(out2.stats.missing.join(','), 'food_gone.jpg', '★ 缺失的照片被记下来')
+eq(packed2.stats.photos, 1, '只带上存在的那张')
+eq(packed2.stats.missing.join(','), 'food_gone.b64', '★ 缺失的照片被记下来')
+eq(packed2.stats.dropped, 1, '缺失数量单独统计（界面上要如实说）')
 eq(
-	readZip(out2.zip).entries.length,
-	2,
-	'★ 缺失的照片不会在 zip 里留个空文件'
+	packed2.payload.records.map((r) => r.photo).join('|'),
+	'food_1.b64|',
+	'★ 照片没了就把路径清空，不留永远显示不出来的死链'
 )
 
-group('fullbackup.js · 导入：路径映射与死链清理')
-
-const back1 = FB.parseFullBackup(out1.zip, (n) => `_doc/food/${n}`)
-eq(back1.ok, true, '解析成功')
-eq(back1.payload.records.length, 3, '记录数对')
-eq(
-	back1.payload.records.map((r) => r.photo).join('|'),
-	'_doc/food/food_1.jpg|_doc/food/food_2.jpg|',
-	'★ 照片路径映射到目标平台路径'
+// 读取函数抛异常也不能把整个导出带崩
+const packed3 = await FB.packPayload(
+	fullPayloadOf([recWith('r1', '_doc/food/food_1.jpg')]),
+	async () => {
+		throw new Error('读照片炸了')
+	}
 )
-eq(back1.photos.length, 2, '带出 2 张照片')
-eq(
-	[...back1.photos[0].bytes].join(','),
-	[...PHOTOS['_doc/food/food_1.jpg']].join(','),
-	'★ 照片字节逐字节一致'
-)
-eq(back1.photos[0].path, '_doc/food/food_1.jpg', '照片有目标写入路径')
+eq(packed3.stats.photos, 0, '读照片抛异常 → 当缺失处理')
+eq(packed3.stats.missing.length, 1, '记下这张缺失')
+eq(packed3.payload.records.length, 1, '★ 记录本身照样导出（照片读不到不该让备份整体失败）')
 
-// 记录里有路径但 zip 里没带照片 → 必须清空，不能留死链
-const noPhotoZip = await buildZip(payload1, {})
-const back2 = FB.parseFullBackup(noPhotoZip.zip, (n) => `_doc/food/${n}`)
+group('fullbackup.js · 解包：名字还原成路径，死链清空')
+
+const unpack1 = FB.unpackPayload(packed1.payload, (n) => `_doc/food/${n}`)
+eq(unpack1.ok, true, '解包成功')
+eq(unpack1.records.length, 3, '记录数对')
 eq(
-	back2.payload.records.map((r) => r.photo).join('|'),
+	unpack1.records.map((r) => r.photo).join('|'),
+	'_doc/food/food_1.b64|_doc/food/food_2.b64|',
+	'★ 照片名字映射回目标平台的路径'
+)
+eq(unpack1.photos.length, 2, '带出 2 张照片本体')
+eq(unpack1.photos[0].base64, 'AAAA', '★ 照片 base64 原样带出')
+eq(unpack1.missing.length, 0, '没有缺失')
+
+// 备份里没有照片 → 必须清空，不能留死链
+const noPhoto = FB.unpackPayload(
+	{ ...packed1.payload, photos: [] },
+	(n) => `_doc/food/${n}`
+)
+eq(
+	noPhoto.records.map((r) => r.photo).join('|'),
 	'||',
-	'★ 备份里没带照片时清空路径（否则换机会留一堆永远显示不出来的死链）'
+	'★ 备份里没带照片时清空路径（否则换机后一堆点不开的死链）'
 )
-eq(back2.photos.length, 0, '没有照片要写')
+eq(noPhoto.photos.length, 0, '没有照片要写')
+eq(noPhoto.records[0].items[0].name, '米饭', '记录本身仍然完好')
 
-eq(back2.payload.records[0].items[0].name, '米饭', '记录本身仍然完好')
+// 兼容旧版 zip 备份里的 "photos/xxx.jpg" 写法
+const legacy = FB.unpackPayload(
+	{
+		records: [{ ...recWith('r1', ''), photo: 'photos/food_1.jpg' }],
+		photos: [{ name: 'food_1.b64', base64: 'AAAA' }],
+	},
+	(n) => `_doc/food/${n}`
+)
+eq(
+	legacy.records[0].photo,
+	'_doc/food/food_1.b64',
+	'★ 旧备份里的 photos/xxx.jpg 也能正确映射（老备份不至于白导）'
+)
 
-group('fullbackup.js · 摘要与坏文件')
+eq(FB.unpackPayload(null, (n) => n).ok, false, '不是备份 → 报错')
+eq(FB.unpackPayload({ records: 'nope' }, (n) => n).ok, false, 'records 不是数组 → 报错')
 
-const fbSum = FB.summarizeFullBackup(out1.zip)
-eq(fbSum.ok, true, '能读摘要')
+group('fullbackup.js · 文本解析与摘要与大小')
+
+const text1 = JSON.stringify(packed1.payload)
+const parsed1 = FB.parseFullBackupText(text1)
+eq(parsed1.ok, true, '文本能解析')
+eq(parsed1.payload.records.length, 3, '解析出记录')
+
+eq(FB.parseFullBackupText('nope').ok, false, '不是 JSON → 报错')
+ok(
+	String(FB.parseFullBackupText('nope').error).indexOf('JSON') >= 0,
+	'错误信息说清是 JSON 的问题'
+)
+eq(FB.parseFullBackupText('{"a":1}').ok, false, '缺少 records → 报错')
+eq(FB.parseFullBackupText('[]').ok, false, '顶层是数组 → 报错')
+
+const fbSum = FB.summarizePayload(packed1.payload)
 eq(fbSum.records, 3, '摘要里的记录数')
 eq(fbSum.photos, 2, '摘要里的照片数')
-eq(fbSum.exportedAt, T(2026, 9, 16, 18, 0), '摘要里的导出时间')
+eq(fbSum.withPhoto, 2, '★ 摘要里的「带照片的记录数」')
 
-eq(FB.summarizeFullBackup(bytesOfText('nope')).ok, false, '不是 zip → 报错')
-
-eq(FB.parseFullBackup(bytesOfText('nope'), () => '').ok, false, '不是 zip → 解析失败')
-
-eq(
-	FB.parseFullBackup(out1.zip, () => '').records,
-	undefined,
-	'失败时不返回半成品 payload'
-)
-
-// 只有 backup.json、没有照片目录的 zip（没有照片的备份）也要能用
-const manifestOnly = await collectZip(
-	zipChunks([{ name: 'backup.json', read: async () => bytesOfText(JSON.stringify(fullPayloadOf([recWith('r1', '')]))) }], { now: 0 })
-)
-const back3 = FB.parseFullBackup(manifestOnly, (n) => n)
-eq(back3.ok, true, '没有照片目录的备份也能解析')
-eq(back3.photos.length, 0, '没有照片')
-eq(back3.payload.records.length, 1, '记录仍在')
+ok(FB.sizeOfPayload(packed1.payload) >= text1.length - 40, '大小估算接近真实文本长度（用来卡上限，不能低估太多）')
 
 /* ========== 完整备份的编排（导出/恢复） ========== */
 
@@ -1381,104 +1259,86 @@ saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice] })
 
 eq(allRecords().length, 2, '先有 2 条记录')
 
-const built = await FBIO.buildFullBackupZip()
+const built = await FBIO.buildFullBackupJson()
 eq(built.ok, true, '能打出完整备份')
-ok(built.bytes.length > 100, `产出 ${built.bytes.length} 字节`)
-eq(
-	readZip(built.bytes).entries.map((e) => e.name).join(','),
-	'backup.json',
-	'Node 下照片读不到，所以 zip 里只有清单（不会塞空文件）'
-)
-eq(built.stats.planned, 1, '规划了 1 张照片')
-eq(built.stats.missing.join(','), 'food_a.jpg', '★ 记录在案的缺失照片')
-eq(built.stats.photos, 0, '实际打进 0 张')
+ok(built.text.length > 100, `产出 ${built.text.length} 字节的文本`)
+ok(String(built.text).indexOf('"format":"cc-full-backup"') > 0, '★ 产出的是可读的 JSON 文本')
+eq(built.stats.photos, 0, 'Node 下照片读不到，所以 0 张')
+eq(built.stats.missing.join(','), 'food_a.b64', '★ 记录在案的缺失照片')
+eq(FB.parseFullBackupText(built.text).ok, true, '产出的文本能被自己的解析器读回来')
 
-const limited = await FBIO.buildFullBackupZip({ limit: 50 })
+const limited = await FBIO.buildFullBackupJson({ limit: 50 })
 eq(limited.ok, false, '★ 超过体积上限时明确拒绝')
-ok(String(limited.error).indexOf('清理') >= 0, `告诉用户怎么办：${limited.error}`)
+ok(String(limited.error).indexOf('删') >= 0, `告诉用户怎么办：${limited.error}`)
 
-group('fullbackup-io.js · 恢复整体流程')
+eq(FBIO.humanSize(512), '512 B', '体积格式化：字节')
+eq(FBIO.humanSize(2048), '2.0 KB', '体积格式化：KB')
+eq(FBIO.humanSize(5 * 1024 * 1024), '5.0 MB', '体积格式化：MB')
+ok(FBIO.fullBackupFileName().indexOf('full.json') > 0, `文件名带 full 后缀：${FBIO.fullBackupFileName()}`)
 
-// 造一个带照片的完整备份
+group('fullbackup-io.js · 恢复整体流程（App：照片写回 .b64）')
+
 const srcPayload = fullPayloadOf([
 	recWith('r1', '_doc/food/food_1.jpg'),
 	recWith('r2', '/storage/emulated/0/Android/data/x/doc/food/food_2.jpg'),
 	recWith('r3', ''),
 ])
-const packOk = await buildZip(srcPayload, PHOTOS)
+const packedSrc = (await FB.packPayload(srcPayload, photoReaderOf(PHOTOS))).payload
+eq(packedSrc.photos.length, 2, '备份里有 2 张照片')
 
-eq(packOk.stats.photos, 2, '备份里有 2 张照片')
+const backupText = JSON.stringify(packedSrc)
 
-freshStorage()
-initDB()
-saveRecord({ ts: T(2026, 9, 16, 20, 0), items: [rice], note: '恢复前的旧记录' })
-const writtenFiles = []
+// 用一个假 plus.io 让 writePhotoBase64 真的走一遍写入
+const envFB = fakePlusIO()
+globalThis.plus = envFB.plus
+const rest = await FBIO.applyRestoredBackup(JSON.parse(backupText))
+delete globalThis.plus
 
-const rest = await FBIO.restoreFullBackup(packOk.zip, {
-	targetPathOf: (n) => `_doc/food/${n}`,
-	writePhoto: async (p) => {
-		writtenFiles.push({ name: p.name, size: p.bytes.length })
-		return { ok: true, path: p.path }
-	},
-})
 eq(rest.ok, true, '恢复成功')
 eq(rest.records, 3, '恢复出 3 条记录')
 eq(rest.photos, 2, '写回 2 张照片')
-eq(rest.failed, 0, '没有写失败')
+eq(rest.failed.length, 0, '没有写失败')
 eq(
-	writtenFiles.map((f) => f.name).join(','),
-	'food_1.jpg,food_2.jpg',
-	'写回的文件名对'
+	envFB.files.get('/abs/_doc/food/food_1.b64'),
+	'AAAA',
+	'★ 照片真的被写成了 .b64 文本文件'
 )
-eq(writtenFiles[0].size, 512, '★ 写回的照片字节数对')
-eq(allRecords().length, 3, '旧记录被覆盖（不是追加）')
-eq(
-	allRecords().some((r) => r.note === '恢复前的旧记录'),
-	false,
-	'恢复前的数据确实被替换掉了'
-)
+eq(envFB.files.get('/abs/_doc/food/food_2.b64'), 'BBBB', '第二张也对')
+eq(allRecords().length, 3, '记录数对（覆盖导入）')
 eq(
 	allRecords()
 		.map((r) => r.photo)
 		.sort()
 		.join('|'),
-	'|_doc/food/food_1.jpg|_doc/food/food_2.jpg',
-	'★ 记录里的照片路径指向新位置（排序后空串在最前）'
+	'|_doc/food/food_1.b64|_doc/food/food_2.b64',
+	'★ 记录里的照片路径指向写回的位置（排序后空串在最前）'
 )
 eq(rest.summary.records, 3, '返回摘要里的记录数')
 eq(rest.summary.photos, 2, '返回摘要里的照片数')
-
-eq(latestSnapshot().payload.records.length, 1, '★ 恢复前自动存了快照（能再退回去）')
 
 group('fullbackup-io.js · 照片写不进去时要清掉死链')
 
 freshStorage()
 initDB()
-const rest2 = await FBIO.restoreFullBackup(packOk.zip, {
-	targetPathOf: (n) => `_doc/food/${n}`,
-	writePhoto: async () => ({ ok: false, error: '磁盘满了' }),
-})
+// 让写入必定失败：文件系统请求直接报错
+const envBad = fakePlusIO({ fsFails: true })
+globalThis.plus = envBad.plus
+const rest2 = await FBIO.applyRestoredBackup(JSON.parse(backupText))
+delete globalThis.plus
+
 eq(rest2.ok, true, '照片写不进去，但记录仍然恢复')
 eq(rest2.photos, 0, '写回 0 张')
-eq(rest2.failed, 2, '两2 张都失败')
+eq(rest2.failed.length, 2, '两张都失败')
 eq(allRecords().length, 3, '记录数对')
 eq(
 	allRecords().filter((r) => r.photo).length,
 	0,
 	'★ 写不进去的照片把路径清空了（否则换机后全是显示不出来的死链）'
 )
-eq(
-	allRecords().filter((r) => r.items.length).length,
-	3,
-	'★ 记录本身完好无损'
-)
+eq(allRecords().filter((r) => r.items.length).length, 3, '★ 记录本身完好无损')
 
-eq((await FBIO.restoreFullBackup(bytesOfText('not a zip'), { writePhoto: async () => ({}) })).ok, false, '坏文件 → 恢复失败')
+eq((await FBIO.applyRestoredBackup({ nope: 1 })).ok, false, '坏备份 → 恢复失败')
 
-eq(FBIO.humanSize(512), '512 B', '体积格式化：字节')
-eq(FBIO.humanSize(2048), '2.0 KB', '体积格式化：KB')
-eq(FBIO.humanSize(5 * 1024 * 1024), '5.0 MB', '体积格式化：MB')
-ok(FBIO.fullBackupFileName().indexOf('full.zip') > 0, `文件名带 full 后缀：${FBIO.fullBackupFileName()}`)
 
 /* ========== Native.js 写二进制：不用 Blob ========== */
 
@@ -1923,204 +1783,184 @@ const withMediaStore = async (opts, fn) => {
  * 这正是真机上的行为（写文本能成，写二进制不能）。
  * zip 部分直接用本项目自己的 zip 引擎，能真正验证打包/解包。
  */
+/**
+ * 假 plus.io。
+ *
+ * 只模拟**真机自检证明能用的那部分**：文本写入、文本读回、列目录、删文件。
+ * 不模拟 copyTo / plus.zip —— 那几条在真机上要么静默失败要么不可靠，
+ * 应用也已经不再依赖它们（照片存成 base64 文本，备份是一个 JSON 文本）。
+ *
+ * opts.fsFails    requestFileSystem 直接失败（模拟磁盘满/无权限）
+ * opts.noDirs     建目录失败（模拟一个输出目录都拿不到）
+ * opts.dropTail   每次 write 悄悄少写最后一个字符（模拟静默丢字节）
+ */
 function fakePlusIO(opts = {}) {
-	const files = new Map() // absPath -> { text }
-	const dirs = new Set(['/ABS', '/ABS/_doc', '/ABS/_downloads', '/ABS/_documents'])
+	/** absPath -> 文本内容（真机上 plus.io 只能可靠地写文本） */
+	const files = new Map()
+	const dirs = new Set(['/abs', '/abs/_doc', '/abs/_downloads', '/abs/_documents'])
 
 	const base = (url) => {
-		const s = String(url || '')
-		if (s.indexOf('/') === 0) return s
-		return '/ABS/' + s.replace(/^\.?\/?/, '')
+		const t = String(url || '')
+		if (t.indexOf('/') === 0) return t.replace(/\/$/, '')
+		return ('/abs/' + t.replace(/^\.?\/?/, '')).replace(/\/$/, '')
 	}
-	const parentOf = (p) => p.slice(0, p.lastIndexOf('/')) || '/ABS'
-	const sizeOf = (f) => (f && f.bytes !== undefined ? f.bytes : Buffer.byteLength((f && f.text) || '', 'utf8'))
+	const nameOf = (p) => p.slice(p.lastIndexOf('/') + 1)
 
-	const entryOf = (abs) => ({
-		name: abs.slice(abs.lastIndexOf('/') + 1),
-		isFile: files.has(abs),
-		fullPath: abs,
-		file: (ok) => {
-			const f = files.get(abs)
-			if (!f) return ok && ok(null)
-			ok({ size: sizeOf(f), name: abs.slice(abs.lastIndexOf('/') + 1) })
-		},
-		remove: (ok) => {
-			files.delete(abs)
-			dirs.delete(abs)
-			ok && ok()
-		},
-		copyTo: (dir, name, ok, fail) => {
-			const src = files.get(abs)
-			if (!src) return fail && fail(new Error('源不存在'))
-			const to = (dir.fullPath || '/ABS') + '/' + name
-			files.set(to, { text: src.text })
-			ok && ok({ fullPath: to })
-		},
-		createWriter: (ok) => {
-			const w = {
-				onwrite: null,
-				onerror: null,
-				seek() {},
-				write(text) {
-					// plus.io 的 FileWriter 按 UTF-8 写字符串 —— 真机上只有这条路能写进去
-					files.set(abs, { text: String(text) })
-					setTimeout(() => w.onwrite && w.onwrite(), 0)
-				},
-			}
-			ok(w)
-		},
-		createReader: () => ({
-			readEntries: (ok) => {
-				const prefix = abs.replace(/\/$/, '') + '/'
-				const out = []
-				for (const k of files.keys()) {
-					if (k.indexOf(prefix) === 0 && k.slice(prefix.length).indexOf('/') < 0) out.push(entryOf(k))
-				}
-				for (const d of dirs) {
-					if (d.indexOf(prefix) === 0 && d.slice(prefix.length).indexOf('/') < 0) {
-						out.push({ name: d.slice(d.lastIndexOf('/') + 1), isFile: false, fullPath: d })
-					}
-				}
-				ok(out)
+	const rootPath = (path) => {
+		const t = String(path || '')
+		if (t.indexOf('/') === 0) return t.replace(/\/$/, '')
+		if (t.indexOf('_') === 0) return base(t)
+		return '/abs/_doc/' + t.replace(/^\.?\/?/, '')
+	}
+
+	const entryOf = (abs) => {
+		const e = {
+			name: nameOf(abs),
+			isFile: files.has(abs),
+			isDirectory: dirs.has(abs),
+			fullPath: abs,
+			__abs: abs,
+			file: (cb) => {
+				const t = files.get(abs)
+				cb && cb(t === undefined ? null : { size: Buffer.byteLength(t, 'utf8'), name: e.name, __abs: abs })
 			},
-		}),
-	})
-
-	const root = {
-		getFile: (abs, o, ok, fail) => {
-			if (opts.writeThrows) return fail && fail(new Error('写入失败'))
-			const p = base(abs)
-			if (!files.has(p)) files.set(p, { text: '' })
-			ok(entryOf(p))
-		},
-		getDirectory: (abs, o, ok, fail) => {
-			const p = base(abs)
-			dirs.add(p)
-			ok(entryOf(p))
-		},
+			remove: (cb) => {
+				files.delete(abs)
+				dirs.delete(abs)
+				cb && cb()
+			},
+			// copyTo：应用已不再用它（真机上会静默失败），但自检会探测它，
+			// 所以 mock 里按「正常工作的 plus.io」实现，供那条探针用
+			copyTo: (dir, name, ok, fail) => {
+				const src = files.get(abs)
+				if (src === undefined) return fail && fail(new Error('源不存在'))
+				const dest = ((dir && dir.fullPath) || '/abs').replace(/\/$/, '') + '/' + name
+				files.set(dest, src)
+				ok && ok(entryOf(dest))
+			},
+			createWriter: (cb) => {
+				// 忠实模拟文件写入：从 pos 开始覆写，pos 随之前进（分块写就是靠这个串起来的）
+				let pos = 0
+				const w = {
+					onwrite: null,
+					onerror: null,
+					seek(n) {
+						pos = Number(n) || 0
+					},
+					truncate() {
+						files.set(abs, '')
+						pos = 0
+					},
+					write(text) {
+						const piece = opts.dropTail ? String(text).slice(0, -1) : String(text)
+						const prev = files.get(abs) || ''
+						files.set(abs, prev.slice(0, pos) + piece + prev.slice(pos + piece.length))
+						pos += piece.length
+						setTimeout(() => w.onwrite && w.onwrite(), 0)
+					},
+				}
+				cb(w)
+			},
+			createReader: () => ({
+				readEntries: (cb) => {
+					const prefix = abs + '/'
+					const out = []
+					for (const k of files.keys()) {
+						if (k.indexOf(prefix) === 0 && k.slice(prefix.length).indexOf('/') < 0) out.push(entryOf(k))
+					}
+					for (const d of dirs) {
+						if (d.indexOf(prefix) === 0 && d.slice(prefix.length).indexOf('/') < 0) {
+							out.push({ name: nameOf(d), isFile: false, isDirectory: true, fullPath: d })
+						}
+					}
+					cb(out)
+				},
+			}),
+		}
+		return e
 	}
 
 	const FileReader = function () {
 		this.readAsDataURL = (file) => {
-			const abs = file && file.name ? null : null
-			// mock 的 file 对象带 fullPath
-			const p = file && file.__abs
-			const f = files.get(p)
+			const abs = (file && file.__abs) || ''
 			setTimeout(() => {
-				if (!f) {
+				const t = files.get(abs)
+				if (t === undefined) {
 					this.onerror && this.onerror(new Error('读不到'))
 					return
 				}
-				const b64 = Buffer.from(f.text, 'utf8').toString('base64')
-				this.onloadend && this.onloadend({ target: { result: 'data:text/plain;base64,' + b64 } })
+				const b64 = Buffer.from(t, 'utf8').toString('base64')
+				this.onloadend && this.onloadend({ target: { result: 'data:application/octet-stream;base64,' + b64 } })
+			}, 0)
+		}
+		// 读文本：返回文件内容本身（不是它的 base64）——
+		// .b64 照片文件的内容已经是 base64，双重编码会让照片永远显示不出来
+		this.readAsText = (file) => {
+			const abs = (file && file.__abs) || ''
+			setTimeout(() => {
+				const t = files.get(abs)
+				if (t === undefined) {
+					this.onerror && this.onerror(new Error('读不到'))
+					return
+				}
+				this.onloadend && this.onloadend({ target: { result: t } })
 			}, 0)
 		}
 	}
 
-	const zipApi = opts.noZip
-		? undefined
-		: {
-				compress: async (srcAbs, zipAbs, ok, fail) => {
-					if (opts.zipThrows) return fail && fail(new Error('压缩失败'))
-					// src 可能是「逗号分隔的多个文件路径」，也可能是单个目录
-					const list = []
-					const parts = String(srcAbs)
-						.split(',')
-						.map((x) => x.trim())
-						.filter(Boolean)
-					for (const raw of parts) {
-						const src = base(raw).replace(/\/$/, '')
-						if (files.has(src)) {
-							// 单文件：按文件名放进 zip 根
-							list.push({
-								name: src.slice(src.lastIndexOf('/') + 1),
-								data: new Uint8Array(Buffer.from(files.get(src).text, 'utf8')),
-							})
-							continue
-						}
-						// 目录：把下面的文件按相对路径放进去
-						for (const [k, v] of files) {
-							if (k.indexOf(src + '/') !== 0) continue
-							list.push({
-								name: k.slice(src.length + 1),
-								data: new Uint8Array(Buffer.from(v.text, 'utf8')),
-							})
-						}
-					}
-					const bytes = await collectZip(
-						zipChunks(
-							list.map((x) => ({ name: x.name, read: async () => x.data })),
-							{ now: 1 }
-						)
-					)
-					const zp = base(zipAbs)
-					zipStore.set(zp, bytes)
-					// 也登记进目录，这样 listDir / fileSize 看得见；大小用真实 zip 字节数
-					files.set(zp, { text: '', bytes: bytes.length })
-					ok && ok()
-				},
-				decompress: async (zipAbs, destAbs, ok, fail) => {
-					if (opts.unzipThrows) return fail && fail(new Error('解压失败'))
-					const bytes = zipStore.get(base(zipAbs))
-					if (!bytes) return fail && fail(new Error('zip 不存在'))
-					const z = readZip(bytes)
-					if (!z.ok) return fail && fail(new Error(z.error))
-					const dest = base(destAbs).replace(/\/$/, '')
-					dirs.add(dest)
-					for (const e of z.entries) {
-						const p = dest + '/' + e.name
-						dirs.add(parentOf(p))
-						files.set(p, { text: Buffer.from(e.bytes).toString('utf8') })
-					}
-					ok && ok()
-				},
-			}
-
-	const zipStore = new Map()
+	const root = {
+		// PRIVATE_DOC 的根就是 _doc —— 真机上 fullPath 也带着这一段，
+		// copyTo 的目标路径要靠它，少了就会拷错地方
+		fullPath: '/abs/_doc',
+		// 相对路径相对 fs 根（_doc）；以 _ 开头的是本地 URL（_doc/xxx）
+		getFile: (path, o, ok, fail) => {
+			if (opts.noDirs) return fail && fail(new Error('写不进去'))
+			const p = rootPath(path)
+			dirs.add(p.slice(0, p.lastIndexOf('/')))
+			if (!files.has(p)) files.set(p, '')
+			ok(entryOf(p))
+		},
+		getDirectory: (path, o, ok, fail) => {
+			if (opts.noDirs) return fail && fail(new Error('建不了目录'))
+			const p = rootPath(path)
+			if (!files.has(p)) dirs.add(p)
+			ok(entryOf(p))
+		},
+	}
 
 	const plusLike = {
 		io: {
-			PRIVATE_DOC: 'PRIVATE_DOC',
+			PRIVATE_DOC: 1,
+			PUBLIC_DOWNLOADS: 2,
+			PUBLIC_DOCUMENTS: 3,
 			convertLocalFileSystemURL: (u) => base(u),
-			requestFileSystem: (type, ok) => ok({ root }),
+			requestFileSystem: (type, ok, fail) => {
+				if (opts.fsFails) return fail && fail(new Error('文件系统不可用'))
+				ok({ root })
+			},
 			resolveLocalFileSystemURL: (u, ok, fail) => {
 				const p = base(u)
-				if (files.has(p) || dirs.has(p)) {
-					const e = entryOf(p)
-					if (files.has(p)) {
-						// 给 FileReader 留个入口
-						e.__abs = p
-					}
-					ok(e)
-				} else fail && fail(new Error('不存在'))
+				if (files.has(p) || dirs.has(p)) ok(entryOf(p))
+				else fail && fail(new Error('找不到：' + p))
 			},
 			FileReader,
 		},
-		zip: zipApi,
-		android: undefined,
 	}
 
-	// file() 回调里拿到的对象要能带 __abs 给 FileReader 用
-	const origResolve = plusLike.io.resolveLocalFileSystemURL
-	plusLike.io.resolveLocalFileSystemURL = (u, ok, fail) => {
-		origResolve(u, (e) => {
-			const patched = Object.assign({}, e)
-			patched.file = (cb) => {
-				e.file((f) => {
-					if (f) f.__abs = base(u)
-					cb && cb(f)
-				})
-			}
-			ok(patched)
-		}, fail)
-	}
+	// 如果外层已经有一个 plus（例如 withMediaStore 造的 android 环境），
+	// 把它并进来 —— 两个假环境叠加时不该互相抹掉
+	const outer = globalThis.plus
+	if (outer && outer.android) plusLike.android = outer.android
+	if (outer && outer.zip) plusLike.zip = outer.zip
 
-	return { plus: plusLike, files, dirs, zipStore }
+	return { plus: plusLike, files, dirs, base }
 }
 
 const withPlusIO = async (opts, fn) => {
 	const env = fakePlusIO(opts)
 	globalThis.plus = env.plus
+	// 输出目录是缓存过的，每个假环境都要重新探测
+	BK._resetOutDirs()
 	try {
 		return await fn(env)
 	} finally {
@@ -2128,128 +1968,133 @@ const withPlusIO = async (opts, fn) => {
 	}
 }
 
-group('plusio.js + plus.zip 链路 · 导出与恢复（真机唯一能走的路）')
+/** 让写入悄悄丢字节，验证「写完回查大小」真的能抓住 */
+const withShortWrite = (fn) => withPlusIO({ dropTail: true }, fn)
+
+group('plusio.js · 文本写入是唯一可靠的路')
 
 const PIO = await import('../src/core/plusio.js')
 
-// 目录可见性判断：私有目录形如 /storage/emulated/0/Android/data/<包名>/...
 eq(
 	PIO.isUserVisible('/storage/emulated/0/Android/data/com.x/apps/y/doc'),
 	false,
-	'Android/data 下的判为不可见'
+	'Android/data 下的目录判为用户不可见'
 )
-eq(PIO.isUserVisible('/storage/emulated/0/Download/x.zip'), true, '公共下载目录判为可见')
+eq(PIO.isUserVisible('/storage/emulated/0/Download/x.json'), true, '公共下载目录判为可见')
 
-await withPlusIO({}, async (env) => {
-	const d = PIO.resolveOutDir()
-	eq(d.url, '_downloads', `优先选 _downloads：${d.url}`)
-	eq(d.visible, true, '且判为可见')
-})
-
-await withPlusIO({}, async (env) => {
-	// 写文本 → 读回（这轮真机证明只有这条路能写）
-	const w = await PIO.writeText('_doc/t.txt', 'hello-世界')
+await withPlusIO({}, async () => {
+	// 写文本 → 回读：自检证明这台设备上只有这条路真的能写进去
+	const w = await PIO.writeText('_doc/t.txt', 'hello-中文')
 	eq(w.ok, true, 'plus.io 写文本成功')
-	eq(await PIO.fileSize('_doc/t.txt'), Buffer.byteLength('hello-世界', 'utf8'), '大小按 UTF-8 字节数')
+	eq(await PIO.fileSize('_doc/t.txt'), Buffer.byteLength('hello-中文', 'utf8'), '大小按 UTF-8 字节算')
 
 	const r = await PIO.readBase64('_doc/t.txt')
 	eq(r.ok, true, '读回成功')
-	eq(Buffer.from(r.base64, 'base64').toString('utf8'), 'hello-世界', '★ 内容往返一致（含中文）')
-})
-
-await withPlusIO({}, async (env) => {
-	// 完整导出：plus.io 写 JSON + 拷照片 + plus.zip 打包
-	freshStorage()
-	initDB()
-	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/food_a.jpg' })
-	saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice] })
-	// 造一张"照片"文件（plus.io 只能写文本，内容无所谓）
-	await PIO.writeText('_doc/food/food_a.jpg', 'FAKEPHOTO-A')
-
-	const plan = FBIO.buildExportPlan()
-	eq(plan.records !== undefined || true, true, '计划已生成')
-	eq(plan.photos.length, 1, '计划里有 1 张照片')
-
-	const out = await BK.exportFullBackupNative(plan, 'calorie-backup-test.zip')
-	eq(out.ok, true, `★ 导出成功：${out.error || ''}`)
-	eq(out.userVisible, true, '落在用户能看到的位置')
-	ok(out.bytes > 0, `zip 有内容（${out.bytes} 字节）`)
-	eq(env.zipStore.size, 1, 'plus.zip 生成了 1 个 zip')
-})
-
-await withPlusIO({}, async (env) => {
-	// 完整往返：导出 → 列出 → 解压 → 恢复
-	freshStorage()
-	initDB()
-	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/food_p1.jpg', note: '带照片' })
-	saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice], note: '无照片' })
-	await PIO.writeText('_doc/food/food_p1.jpg', 'PHOTO-ONE')
-
-	const plan = FBIO.buildExportPlan()
-	const out = await BK.exportFullBackupNative(plan, 'calorie-backup-2026-09-16.zip')
-	eq(out.ok, true, '导出成功')
-
-	const list = await BK.listBackupFiles()
-	eq(list.length, 1, `★ 能列出备份文件：${JSON.stringify(list.map((x) => x.name))}`)
-	eq(list[0].name, 'calorie-backup-2026-09-16.zip', '文件名对')
-	ok(list[0].size > 0, `带上了大小（${list[0].size}）`)
-
-	// 清空后恢复
-	clearAll()
-	eq(allRecords().length, 0, '先清空')
-
-	const loaded = await BK.loadBackupFromFile(list[0].url)
-	eq(loaded.ok, true, `★ 解压并读到 backup.json：${loaded.error || ''}`)
-	eq(loaded.payload.records.length, 2, '备份里有 2 条记录')
-	eq(loaded.photos, 1, '★ 照片被拷回私有目录')
-
-	const applied = FBIO.applyRestoredBackup(loaded.payload)
-	eq(applied.ok, true, '恢复写入成功')
-	eq(allRecords().length, 2, '★ 记录回到 2 条')
-	const withPhoto = allRecords().find((r) => r.note === '带照片')
-	eq(withPhoto.photo, '_doc/food/food_p1.jpg', '★ 照片路径指向拷回后的位置')
-	const noPhoto = allRecords().find((r) => r.note === '无照片')
-	eq(noPhoto.photo, '', '没照片的记录保持空')
-	eq(await PIO.fileSize('_doc/food/food_p1.jpg'), Buffer.byteLength('PHOTO-ONE', 'utf8'), '照片内容真的拷回来了')
-})
-
-await withPlusIO({}, async (env) => {
-	// 备份里没带照片时，记录的图片字段必须被清空（不留死链）
-	freshStorage()
-	initDB()
-	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/gone.jpg' })
-	const plan = FBIO.buildExportPlan()
-	// 故意把照片源改成不存在的，模拟照片已丢
-	plan.photos[0].from = '_doc/food/does_not_exist.jpg'
-	const out = await BK.exportFullBackupNative(plan, 'calorie-backup-x.zip')
-	eq(out.ok, true, '导出照样成功（照片丢了不该让整个导出失败）')
-	eq(out.missing.length, 1, '记下了缺失的那张')
-
-	const list = await BK.listBackupFiles()
-	const loaded = await BK.loadBackupFromFile(list[0].url)
-	eq(loaded.ok, true, '恢复读取成功')
-	eq(loaded.payload.records[0].photo, '', '★ 缺的照片被清空，不留死链')
-})
-
-group('plusio.js · 失败路径')
-eq((await PIO.writeText('_doc/x.txt', 'a')).ok, false, '没有 plus 时写文件失败而不是崩')
-eq(PIO.hasZip(), false, '没有 plus 时 hasZip 为 false')
-eq((await PIO.zipCompress('_doc/a', '_doc/b.zip')).ok, false, '没有 plus.zip 时报失败')
-
-await withPlusIO({ noZip: true }, async () => {
-	eq(PIO.hasZip(), false, '未启用 Zip 模块时 hasZip 为 false')
-	const r = await PIO.zipCompress('_doc/a', '_doc/b.zip')
-	eq(r.ok, false, '压缩失败并给出原因')
-	ok(String(r.error).indexOf('Zip 模块') >= 0, `提示要勾模块：${r.error}`)
+	eq(Buffer.from(r.base64, 'base64').toString('utf8'), 'hello-中文', '★ 字节完全一致（中文不乱码）')
 })
 
 await withPlusIO({}, async () => {
-	const r = await PIO.listDir('_doc/nope')
-	eq(r.ok, false, '列不存在的目录 → 失败而不是抛异常')
-	eq(Array.isArray(r.names), true, '仍然返回数组，调用方不用防御')
+	// 写入大小不对时必须报失败，不能返回「看起来成功」
+	const bad = await withShortWrite(async () => PIO.writeTextChecked('_doc/t2.txt', 'ABCDEFGH'))
+	eq(bad.ok, false, '★ 写完回查大小，对不上就报失败')
+	ok(String(bad.error).indexOf('大小') >= 0, `错误信息说清是大小问题：${bad.error}`)
 })
 
-/* ========== 原生能力自检 ========== */
+await withPlusIO({}, async () => {
+	// 分块写：超过单块上限的文本也要完整落盘
+	const big = 'B'.repeat(PIO.WRITE_CHUNK * 2 + 123)
+	const w = await PIO.writeTextChecked('_doc/big.txt', big)
+	eq(w.ok, true, '★ 超长文本分块写成功')
+	eq(w.bytes, big.length, '字节数与预期一致')
+	const back = await PIO.readText('_doc/big.txt')
+	eq(back.ok, true, '读回成功')
+	eq(back.text.length, big.length, '★ 分块写没有丢内容')
+})
+
+group('完整备份 · 真机唯一能走的路（plus.io 文本）')
+
+await withPlusIO({}, async (env) => {
+	// 端到端：存记录（带照片）→ 导出 → 清空 → 从文件恢复 → 照片回来
+	freshStorage()
+	initDB()
+	// 照片在磁盘上就是 base64 文本
+	await PIO.writeText('_doc/food/food_p1.b64', 'UEhPVE8tT05F')
+	await PIO.writeText('_doc/food/food_p2.b64', 'UEhPVE8tVFdP')
+	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/food_p1.b64', note: '有照片' })
+	saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice], photo: '_doc/food/food_p2.b64', note: '也有照片' })
+
+	const built = await FBIO.buildFullBackupJson()
+	eq(built.ok, true, '导出成功')
+	eq(built.stats.photos, 2, '★ 两张照片都进备份了')
+	eq(built.stats.missing.length, 0, '没有缺失')
+
+	const parsed = FB.parseFullBackupText(built.text)
+	eq(parsed.ok, true, '备份文本能解析回来')
+	eq(parsed.payload.photos.length, 2, '备份里确实有照片本体')
+
+	// 写进「下载目录」
+	const out = await BK.exportFullBackupText(built.text, 'calorie-backup-test-full.json')
+	eq(out.ok, true, `★ 导出到磁盘成功：${out.error || ''}`)
+	eq(out.userVisible, true, '落在用户能看到的目录')
+	eq(
+		out.bytes,
+		Buffer.byteLength(built.text, 'utf8'),
+		'★ 写进去的字节数与文本的 UTF-8 字节数一致（不是 0 字节；注意中文，不能用 length）'
+	)
+
+	// 清空，再列文件、读回来
+	clearAll()
+	eq(allRecords().length, 0, '清空成功')
+
+	const listed = await BK.listBackupFiles()
+	eq(listed.ok, true, '列出备份文件成功')
+	eq(listed.files.length, 1, '★ 找到了刚导出的那个备份')
+	eq(listed.files[0].name, 'calorie-backup-test-full.json', '文件名对')
+	eq(listed.files[0].size > 0, true, '★ 文件大小回查正常（不是 0 字节）')
+
+	const loaded = await BK.loadBackupFromFile(listed.files[0].url)
+	eq(loaded.ok, true, `读取备份成功：${loaded.error || ''}`)
+	eq(loaded.payload.records.length, 2, '读回 2 条记录')
+
+	const applied = await FBIO.applyRestoredBackup(loaded.payload)
+	eq(applied.ok, true, '恢复成功')
+	eq(applied.records, 2, '恢复出 2 条记录')
+	eq(applied.photos, 2, '★ 写回 2 张照片')
+	eq(env.files.get('/abs/_doc/food/food_p1.b64'), 'UEhPVE8tT05F', '★ 照片内容逐字符一致')
+	eq(allRecords().length, 2, '记录回到 2 条')
+	eq(
+		allRecords().filter((r) => r.photo).length,
+		2,
+		'★ 两条记录的照片路径都在（换手机后照片不会消失）'
+	)
+	eq(
+		allRecords().every((r) => r.photo.indexOf('_doc/food/') === 0),
+		true,
+		'照片路径指向私有目录'
+	)
+})
+
+await withPlusIO({}, async () => {
+	// 照片缺失：导出照样成功，但如实报告，且不留死链
+	freshStorage()
+	initDB()
+	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/nope.b64' })
+	saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice] })
+
+	const built = await FBIO.buildFullBackupJson()
+	eq(built.ok, true, '照片丢失不影响导出')
+	eq(built.stats.photos, 0, '0 张照片')
+	eq(built.stats.dropped, 1, '★ 如实记下 1 张缺失')
+	const parsed = FB.parseFullBackupText(built.text)
+	eq(parsed.payload.records[0].photo, '', '★ 缺照片的那条记录图片字段被清空')
+})
+
+await withPlusIO({ noDirs: true }, async () => {
+	// 一个目录都写不进去 → 明确报失败，不能假装成功
+	const r = await BK.exportFullBackupText('{"records":[]}', 'x.json')
+	eq(r.ok, false, '★ 全写不进去时报失败')
+	ok(String(r.error).indexOf('写不进去') >= 0, `说清是写不进去：${r.error}`)
+})
 
 const ST = await import('../src/core/selftest.js')
 
@@ -2259,53 +2104,55 @@ group('selftest.js · 自检要能报出真话')
 const st1 = await ST.runSelfTest()
 ok(Array.isArray(st1.rows) && st1.rows.length > 0, '产出报告行')
 ok(st1.text.indexOf('原生能力自检') >= 0, '报告有标题')
-eq(st1.rows[0].ok, false, '非 Android 环境下第一条就报不通')
+eq(st1.rows[0].ok, false, '没有 plus 时第一条就报不通')
 ok(st1.text.indexOf('不通') >= 0, '报告里出现「不通」')
 
-// 假 Android 环境：全部探针都要跑完，而且刻意弄坏哪些，就得报出哪些
-await withMediaStore(
-	{ rafThrows: true, readStringThrows: true, readAllLinesThrows: true },
-	async () => {
+// 假 Android + 假 plus.io：核心路径（文本写读、照片往返、备份往返）要全通
+await withMediaStore({}, async () => {
+	await withPlusIO({}, async () => {
 		const st2 = await ST.runSelfTest()
 		const byName = (n) => st2.rows.find((x) => x.name.indexOf(n) >= 0)
 
 		ok(!!byName('运行环境'), '有「运行环境」这条')
 		eq(byName('运行环境').ok, true, '假 Android 环境被认出来')
-		ok(String(byName('运行环境').detail).indexOf('API 36') >= 0, `读到 API 级别：${byName('运行环境').detail}`)
-
-		// ★ 自检的价值就在这里：刻意弄坏的项，必须报不通
-		eq(byName('RandomAccessFile.writeBytes').ok, false, '★ 弄坏 writeBytes → 自检报不通')
-		eq(byName('readString').ok, false, '★ 弄坏 readString → 自检报不通')
-		eq(byName('readAllLines').ok, false, '★ 弄坏 readAllLines → 自检报不通')
-
-		// 没弄坏的项应当通过
-		eq(byName('Native.js 基本调用').ok, true, '基本调用通过')
-		eq(byName('导入 java.nio.file.Files').ok, true, 'Files 可导入')
-
 		ok(
-			st2.text.indexOf('RandomAccessFile.writeBytes') >= 0,
-			'报告里列出了具体项名，便于对照'
+			String(byName('运行环境').detail).indexOf('API 36') >= 0,
+			`读到 API 级别：${byName('运行环境').detail}`
 		)
-		ok(
-			/\d+ 项不通/.test(st2.text),
-			`报告末尾汇总了几项不通：${st2.text.split(String.fromCharCode(10)).pop()}`
-		)
-	}
-)
 
-// 功能完好的环境：文件相关的核心探针都该通过
+		// ★ 这几条就是应用真正依赖的路径，必须通
+		eq(byName('plus.io 可用').ok, true, 'plus.io 那条通过')
+		eq(byName('plus.io 写文本 + 核对大小').ok, true, '★ 写文本 + 回查大小通过')
+		eq(byName('plus.io 读文本').ok, true, '★ 读文本通过（含中文）')
+		eq(byName('照片落盘往返').ok, true, '★ 照片存了再读回完全一致')
+		eq(byName('备份文本往返').ok, true, '★ 备份写了再读回能解析')
+		eq(byName('plus.io copyTo').ok, true, '备选路径 copyTo 通过')
+
+		ok(st2.text.indexOf('照片落盘往返') >= 0, '报告里列出了具体项名，便于对照')
+		ok(/\d+ 项不通/.test(st2.text) || st2.text.indexOf('全部通过') >= 0, '报告末尾有汇总')
+	})
+})
+
+// 刻意弄坏：写入悄悄丢字节 → 自检必须报不通（这正是「静默失败」的防线）
 await withMediaStore({}, async () => {
-	const st3 = await ST.runSelfTest()
-	const byName = (n) => st3.rows.find((x) => x.name.indexOf(n) >= 0)
-	eq(byName('RandomAccessFile.writeBytes').ok, true, 'writeBytes 探针通过')
-	eq(byName('Files.writeString → readString(1参)').ok, true, '★ 核心往返探针通过')
-	eq(byName('Files.readAllLines(1参)').ok, true, 'readAllLines 探针通过')
-	eq(byName('Files.copy(Path, Path)').ok, true, 'Files.copy 探针通过')
-	const bad = st3.rows.filter((r) => r.ok === false).map((r) => r.name)
-	ok(
-		bad.every((n) => n.indexOf('plus.io') >= 0 || n.indexOf('plus.zip') >= 0),
-		`不通的只剩 mock 没提供的 plus.io / plus.zip：${bad.join('、') || '无'}`
-	)
+	await withPlusIO({ dropTail: true }, async () => {
+		const st3 = await ST.runSelfTest()
+		const byName = (n) => st3.rows.find((x) => x.name.indexOf(n) >= 0)
+		eq(byName('plus.io 写文本 + 核对大小').ok, false, '★ 写入丢字节 → 自检报不通')
+		eq(byName('照片落盘往返').ok, false, '★ 照片往返也会报不通（不会假装成功）')
+		ok(String(byName('plus.io 写文本 + 核对大小').detail).indexOf('大小') >= 0, '错误里说清是大小不对')
+	})
+})
+
+// 完全写不进去的环境（磁盘满 / 无权限）
+await withMediaStore({}, async () => {
+	await withPlusIO({ fsFails: true }, async () => {
+		const st4 = await ST.runSelfTest()
+		const byName = (n) => st4.rows.find((x) => x.name.indexOf(n) >= 0)
+		eq(byName('plus.io 写文本 + 核对大小').ok, false, '文件系统不可用 → 报不通')
+		eq(byName('照片落盘往返').ok, false, '照片也写不了')
+		ok(st4.text.indexOf('影响备份') >= 0, '★ 报告末尾单独指出哪些不通会影响备份/照片')
+	})
 })
 
 group('selftest.js · 报告格式')

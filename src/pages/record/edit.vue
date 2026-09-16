@@ -230,7 +230,15 @@ import {
 import { itemTotals, round, sumItems } from '../../core/nutrition.js'
 import { recentFoods } from '../../core/stats.js'
 import { takeDraft } from '../../core/draft.js'
-import { persistPhoto, photoPathFor, photoSrc, pickImage, toBase64 } from '../../core/photo.js'
+import {
+	isTextPhoto,
+	persistPhoto,
+	photoDataUrl,
+	photoPathFor,
+	photoSrc,
+	pickImage,
+	toBase64,
+} from '../../core/photo.js'
 import { recognize } from '../../core/ai.js'
 
 /* 输入框用字符串保存，避免受控数字输入在 "1." 这类中间态被归零 */
@@ -249,17 +257,40 @@ const photo = ref('')
 const photoTransient = ref(false)
 /**
  * 给 <image src> 用的路径。
- * App 端需要把 _doc/xxx 这类本地 URL 转成平台绝对路径才能稳定渲染，
- * 用 computed 避免每次重渲染都调一次原生转换。
+ *
+ * 照片在磁盘上是 base64 文本（.b64），要**异步读出来**才能显示；
+ * 老的 .jpg 文件与 data:/blob: 直接同步转换即可。
+ * 所以这里是一个 ref，由 watch 负责填充。
  */
-const photoView = computed(() => photoSrc(photo.value))
+const photoView = ref('')
 /** 照片文件已经读不出来了（换手机 / 清理数据后）—— 界面上要说清楚 */
 const photoDead = ref(false)
 
-// 换了照片就重置「丢失」状态
-watch(photo, () => {
+async function loadPhotoView() {
+	const p = photo.value
 	photoDead.value = false
-})
+	if (!p) {
+		photoView.value = ''
+		return
+	}
+	if (isTextPhoto(p)) {
+		photoView.value = ''
+		const r = await photoDataUrl(p)
+		// 读的过程中用户可能又换了照片，别把新的覆盖掉
+		if (photo.value !== p) return
+		if (r.ok) {
+			photoView.value = r.url
+		} else {
+			photoView.value = ''
+			photoDead.value = true
+		}
+		return
+	}
+	photoView.value = photoSrc(p)
+}
+
+// 换了照片就重新读
+watch(photo, loadPhotoView, { immediate: true })
 
 function onPhotoError() {
 	photoDead.value = true
@@ -381,8 +412,7 @@ function onNote(e) {
 }
 
 function previewPhoto() {
-	if (!photo.value) return
-	// 用转换后的路径，App 端 _doc/xxx 直接给 previewImage 可能打不开
+	if (!photo.value || !photoView.value) return
 	uni.previewImage({ urls: [photoView.value] })
 }
 

@@ -112,7 +112,7 @@ export async function saveToDownloads(text, filename) {
 	if (!hasPlusIoAvailable()) {
 		return { ok: false, unsupported: true, error: '当前平台不支持写文件' }
 	}
-	const out = resolveOutDir()
+	const out = await resolveOutDir()
 	const url = `${out.url}/${filename}`
 	const wrote = await plusio.writeText(url, text)
 	if (!wrote.ok) return { ok: false, error: wrote.error }
@@ -144,7 +144,7 @@ function utf8Len(str) {
 	return n
 }/* ---------------- 完整备份：读写文件 ---------------- */
 
-import { bytesToBase64 } from './zip.js'
+import { bytesToBase64 } from './base64.js'
 import * as plusio from './plusio.js'
 
 /** ISO-8859-1 字符串 → 字节（每个码点低 8 位就是一个字节） */
