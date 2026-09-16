@@ -1896,6 +1896,11 @@ function fakePlusIO(opts = {}) {
 		// 读文本：返回文件内容本身（不是它的 base64）——
 		// .b64 照片文件的内容已经是 base64，双重编码会让照片永远显示不出来
 		this.readAsText = (file) => {
+			if (opts.noReadAsText) {
+				// 模拟「这个方法在这台设备上不可用」
+				setTimeout(() => this.onerror && this.onerror(new Error('readAsText 不支持')), 0)
+				return
+			}
 			const abs = (file && file.__abs) || ''
 			setTimeout(() => {
 				const t = files.get(abs)
@@ -1928,14 +1933,29 @@ function fakePlusIO(opts = {}) {
 		},
 	}
 
+	// 公共目录（真机上在 /storage/emulated/0/Download 这类位置）
+	for (const d of opts.publicDirs || []) dirs.add(String(d).replace(/\/$/, ''))
+
 	const plusLike = {
 		io: {
-			PRIVATE_DOC: 1,
-			PUBLIC_DOWNLOADS: 2,
-			PUBLIC_DOCUMENTS: 3,
-			convertLocalFileSystemURL: (u) => base(u),
+			PRIVATE_DOC: 2,
+			PUBLIC_DOWNLOADS: 3,
+			PUBLIC_DOCUMENTS: 4,
+			convertLocalFileSystemURL: (u) => {
+				const t = String(u || '')
+				if (t === '_downloads') return '/abs/_downloads'
+				if (t === '_documents') return '/abs/_documents'
+				if (t.indexOf('/') === 0) return t.replace(/\/$/, '')
+				return base(t)
+			},
 			requestFileSystem: (type, ok, fail) => {
 				if (opts.fsFails) return fail && fail(new Error('文件系统不可用'))
+				// PUBLIC_* → 公共目录的根（真机上 root.fullPath 就是那个绝对路径）
+				if (type === 3 || type === 4) {
+					const dir = (opts.publicDirs || [])[0]
+					if (!dir) return fail && fail(new Error('没有公共目录'))
+					return ok({ root: { fullPath: String(dir).replace(/\/$/, '') } })
+				}
 				ok({ root })
 			},
 			resolveLocalFileSystemURL: (u, ok, fail) => {
@@ -2009,6 +2029,75 @@ await withPlusIO({}, async () => {
 	const back = await PIO.readText('_doc/big.txt')
 	eq(back.ok, true, '读回成功')
 	eq(back.text.length, big.length, '★ 分块写没有丢内容')
+})
+
+group('plusio.js · 读文本的双路回退')
+
+await withPlusIO({}, async () => {
+	await PIO.writeText('_doc/rt.txt', '内容-中文-123')
+	const r = await PIO.readText('_doc/rt.txt')
+	eq(r.ok, true, '读文本成功')
+	eq(r.text, '内容-中文-123', '内容一致')
+	eq(r.via, 'readAsText', '优先走 readAsText')
+})
+
+await withPlusIO({ noReadAsText: true }, async (env) => {
+	// 真机上 plus.io 各方法个体差异很大：readAsText 不可用时必须能退到 base64 解码
+	await PIO.writeText('_doc/rt2.txt', '回退路径-中文')
+	const r = await PIO.readText('_doc/rt2.txt')
+	eq(r.ok, true, '★ readAsText 不可用 → 自动退到 base64 解码')
+	eq(r.text, '回退路径-中文', '★ 内容依然完全正确（中文不乱码）')
+	eq(r.via, 'base64 解码', '报告用了哪条路')
+})
+
+await withPlusIO({}, async (env) => {
+	// .b64 照片文件的内容本身就是 base64：读回来必须是那段 base64 文本，不能再编码一次
+	await PIO.writeText('_doc/food/x.b64', 'UEhPVE8tT05F')
+	const r = await PIO.readText('_doc/food/x.b64')
+	eq(r.text, 'UEhPVE8tT05F', '★ 读 .b64 得到的就是 base64 文本本身（不是它的再编码）')
+})
+
+group('plusio.js · 公共目录（换手机时文件从这儿进来）')
+
+await withPlusIO({ publicDirs: ['/storage/emulated/0/Download'] }, async (env) => {
+	env.files.set('/storage/emulated/0/Download/calorie-backup-2026-01-01-full.json', '{"records":[]}')
+	PIO._resetOutDirs()
+	const pubs = await PIO.publicDirCandidates()
+	eq(pubs.length, 1, '★ 探测到手机公共下载目录')
+	eq(pubs[0].visible, true, '公共目录对用户可见')
+
+	const found = await PIO.findBackupsAt(pubs[0].abs, 'calorie-backup')
+	eq(found.length, 1, '★ 在公共目录里找到了备份文件')
+	eq(await PIO.fileSizeAt(found[0].url) > 0, true, '文件大小能读到')
+})
+
+await withPlusIO({}, async () => {
+	PIO._resetOutDirs()
+	const pubs = await PIO.publicDirCandidates()
+	eq(pubs.length, 0, '没有公共目录时返回空数组（不报错）')
+})
+
+await withPlusIO({ publicDirs: ['/storage/emulated/0/Download'] }, async (env) => {
+	// ★ 完整场景：从微信下载到手机公共下载目录的备份，应用要能找到并读出来
+	freshStorage()
+	initDB()
+	env.files.set(
+		'/storage/emulated/0/Download/calorie-backup-2026-01-01-full.json',
+		JSON.stringify({
+			format: 'cc-full-backup',
+			version: 2,
+			records: [recWith('r1', '')],
+			photos: [],
+		})
+	)
+	PIO._resetOutDirs()
+	const listed = await BK.listBackupFiles()
+	eq(listed.files.length, 1, '★ listBackupFiles 扫到了公共目录里的备份')
+	eq(listed.files[0].visible, true, '这一份是用户可见的')
+
+	const loaded = await BK.loadBackupFromFile(listed.files[0].url)
+	eq(loaded.ok, true, `★ 能直接读出这个文件：${loaded.error || ''}`)
+	eq(loaded.payload.records.length, 1, '内容解析正确')
 })
 
 group('完整备份 · 真机唯一能走的路（plus.io 文本）')

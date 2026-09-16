@@ -21,7 +21,8 @@ const OUT_DIRS = [
 	{ url: '_doc', label: '应用私有目录' },
 ]
 
-import { utf8Length } from './utf8.js'
+import { utf8Decode, utf8Length } from './utf8.js'
+import { base64ToBytes } from './base64.js'
 
 export function hasPlusIo() {
 	return (
@@ -59,6 +60,158 @@ export function isUserVisible(absPath) {
  * @returns {{url:string, abs:string, label:string, visible:boolean}}
  */
 /**
+ * 手机**公共**存储里的目录。
+ *
+ * 为什么单独列：`_downloads` 是**应用私有**的下载目录
+ * （真机上解析成 /storage/emulated/0/Android/data/<包名>/downloads），
+ * 而从微信/网盘下载的备份、用数据线拷进手机的文件，都在手机**公共**的
+ * Download / Documents 里 —— 换手机时文件正是从那里进来的。
+ *
+ * 怎么找到它们：plus.io 只给私有目录提供了 `_xxx` 这种短路径，
+ * 公共目录没有等价写法，而且不同 ROM 的绝对路径也不完全一样
+ * （/sdcard 与 /storage/emulated/0 都常见）。
+ * 所以这里**不猜文档语义，直接试 + 验证**：
+ * 候选路径逐个去列目录，能列出来的才算数。
+ */
+const PUBLIC_CANDIDATES = [
+	{ label: '手机下载目录', paths: ['/storage/emulated/0/Download', '/sdcard/Download'] },
+	{ label: '手机文档目录', paths: ['/storage/emulated/0/Documents', '/sdcard/Documents'] },
+]
+
+let _publicDirs = null
+
+/** 公共目录候选（只返回**真的能列出来**的） */
+export async function publicDirCandidates() {
+	if (_publicDirs) return _publicDirs
+	const out = []
+	const seen = new Set()
+
+	const push = async (label, abs) => {
+		const p = String(abs || '').replace(/\/$/, '')
+		if (!p || seen.has(p)) return
+		seen.add(p)
+		const r = await listDirAt(p)
+		if (!r.ok) return
+		out.push({ url: p, abs: p, label, visible: true, public: true })
+	}
+
+	// 1) 先问 plus.io 要（PUBLIC_* 文件系统的根路径）
+	for (const [type, label] of [
+		['PUBLIC_DOWNLOADS', '手机下载目录'],
+		['PUBLIC_DOCUMENTS', '手机文档目录'],
+	]) {
+		const root = await publicRootPath(type)
+		if (root) await push(label, root)
+	}
+
+	// 2) 再试常见绝对路径（有些 ROM 上一步拿不到，但路径是通的）
+	for (const c of PUBLIC_CANDIDATES) {
+		for (const p of c.paths) await push(c.label, p)
+	}
+
+	_publicDirs = out
+	return out
+}
+
+/** 取 PUBLIC_* 文件系统的根路径 */
+function publicRootPath(type) {
+	return new Promise((resolve) => {
+		if (!hasPlusIo() || typeof plus.io.requestFileSystem !== 'function') {
+			resolve('')
+			return
+		}
+		const t = plus.io[type]
+		if (t === undefined || t === null) {
+			resolve('')
+			return
+		}
+		try {
+			plus.io.requestFileSystem(
+				t,
+				(fs) => {
+					const root = fs && fs.root
+					let p = (root && (root.fullPath || root.toLocalURL && '')) || ''
+					if (p && p.indexOf('/') !== 0) {
+						// fullPath 是相对形式时，转成绝对路径
+						try {
+							p = plus.io.convertLocalFileSystemURL(p) || p
+						} catch (e) {
+							/* 用原值 */
+						}
+					}
+					resolve(p || '')
+				},
+				() => resolve('')
+			)
+		} catch (e) {
+			resolve('')
+		}
+	})
+}
+
+/** 直接按绝对路径列目录（公共目录只能这么读） */
+export function listDirAt(absPath) {
+	return new Promise((resolve) => {
+		if (!hasPlusIo() || !absPath) {
+			resolve({ ok: false, error: 'plus.io 不可用', names: [] })
+			return
+		}
+		try {
+			plus.io.resolveLocalFileSystemURL(
+				absPath,
+				(entry) => {
+					const reader = entry.createReader()
+					reader.readEntries(
+						(entries) => {
+							const names = []
+							for (let i = 0; i < entries.length; i++) {
+								const e = entries[i]
+								names.push({
+									name: e.name,
+									isFile: e.isFile,
+									url: `${String(absPath).replace(/\/$/, '')}/${e.name}`,
+								})
+							}
+							resolve({ ok: true, names })
+						},
+						() => resolve({ ok: false, error: '读目录失败', names: [] })
+					)
+				},
+				() => resolve({ ok: false, error: '目录不存在', names: [] })
+			)
+		} catch (e) {
+			resolve({ ok: false, error: String((e && e.message) || e), names: [] })
+		}
+	})
+}
+
+/** 按绝对路径找备份文件（公共目录用） */
+export async function findBackupsAt(absPath, prefix = 'calorie-backup') {
+	const r = await listDirAt(absPath)
+	if (!r.ok) return []
+	return r.names.filter((f) => f.isFile && f.name.indexOf(prefix) === 0)
+}
+
+/** 按绝对路径查文件大小（公共目录用） */
+export function fileSizeAt(absPath) {
+	return new Promise((resolve) => {
+		if (!hasPlusIo() || !absPath) {
+			resolve(-1)
+			return
+		}
+		try {
+			plus.io.resolveLocalFileSystemURL(
+				absPath,
+				(entry) => entry.file((file) => resolve(Number(file.size) || 0), () => resolve(-1)),
+				() => resolve(-1)
+			)
+		} catch (e) {
+			resolve(-1)
+		}
+	})
+}
+
+/**
  * 候选输出目录（用户可见的排前面）。每个都试着建出来，建不成的不算。
  * 只探测一次：探测本身要建目录，每次操作都来一遍没必要。
  */
@@ -79,6 +232,7 @@ export async function outDirCandidates() {
 /** 测试用：清掉目录缓存 */
 export function _resetOutDirs() {
 	_outDirs = null
+	_publicDirs = null
 }
 
 /** 首选输出目录 */
@@ -241,10 +395,21 @@ export async function writeTextChecked(localUrl, text) {
 /**
  * 读文本文件。
  *
- * ⚠️ 必须用 readAsText，不能用 readAsDataURL 再截逗号后面：
+ * 两条路都走 plus.io，都不经过 Native.js：
+ *   1. readAsText —— 直接拿文本（最干净）
+ *   2. readAsDataURL → 把 base64 解回文本（纯 JS 解码）
+ *
+ * 为什么要有第 2 条：真机上 plus.io 的各个方法**个体差异很大**
+ * （同一个 plus.io，写文本能成、copyTo 却失败），所以不能假设
+ * readAsText 一定可用。第 2 条只用「读成 base64」这一个动作，
+ * 剩下的解码在我们自己手里。
+ *
+ * ⚠️ 不能拿「readAsDataURL 再截逗号后面」直接当结果：
  *    .b64 照片文件的**内容**本身就是 base64 文本，
- *    用 readAsDataURL 读会把这段文本再 base64 一次（双重编码），
- *    照片就永远显示不出来。这个坑是测试逮出来的。
+ *    那样会得到「base64 的 base64」（双重编码），照片永远显示不出来。
+ *    必须真的解码回文本。这个坑是测试逮出来的。
+ *
+ * @returns {Promise<{ok:boolean, text?:string, size?:number, via?:string, error?:string}>}
  */
 export function readText(localUrl) {
 	return new Promise((resolve) => {
@@ -263,13 +428,56 @@ export function readText(localUrl) {
 				(entry) => {
 					entry.file(
 						(file) => {
-							const reader = new plus.io.FileReader()
-							reader.onloadend = (e) => {
-								const s = (e && e.target && e.target.result) || ''
-								resolve({ ok: true, text: String(s), size: file.size })
+							const viaBase64 = () => {
+								const reader = new plus.io.FileReader()
+								reader.onloadend = (e) => {
+									const raw = String((e && e.target && e.target.result) || '')
+									const comma = raw.indexOf(',')
+									const b64 = comma >= 0 ? raw.slice(comma + 1) : raw
+									if (!b64) {
+										resolve({ ok: false, error: '两种读法都读不出内容（文件可能是 0 字节）' })
+										return
+									}
+									try {
+										resolve({
+											ok: true,
+											text: utf8Decode(base64ToBytes(b64)),
+											size: file.size,
+											via: 'base64 解码',
+										})
+									} catch (err) {
+										resolve({
+											ok: false,
+											error: 'base64 解码失败：' + String((err && err.message) || err),
+										})
+									}
+								}
+								reader.onerror = () => resolve({ ok: false, error: 'FileReader 出错（文件可能太大）' })
+								try {
+									reader.readAsDataURL(file)
+								} catch (e) {
+									resolve({ ok: false, error: 'readAsDataURL 异常' })
+								}
 							}
-							reader.onerror = () => resolve({ ok: false, error: 'FileReader 出错（文件可能太大）' })
-							reader.readAsText(file)
+							const viaText = () => {
+								const reader = new plus.io.FileReader()
+								reader.onloadend = (e) => {
+									const t = (e && e.target && e.target.result) || ''
+									if (String(t).length) {
+										resolve({ ok: true, text: String(t), size: file.size, via: 'readAsText' })
+										return
+									}
+									// readAsText 在这台设备上返回空 → 换第二条路
+									viaBase64()
+								}
+								reader.onerror = () => viaBase64()
+								try {
+									reader.readAsText(file)
+								} catch (e) {
+									viaBase64()
+								}
+							}
+							viaText()
 						},
 						() => resolve({ ok: false, error: 'entry.file 失败' })
 					)
@@ -281,7 +489,7 @@ export function readText(localUrl) {
 		}
 	})
 }
-/** 读文件为 base64（plus.io FileReader → dataURL） */
+
 export function readBase64(localUrl) {
 	return new Promise((resolve) => {
 		if (!hasPlusIo()) {

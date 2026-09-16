@@ -149,12 +149,15 @@
 				<text class="sub-title">完整备份（含照片）</text>
 			</view>
 			<text class="hint t-xs t-mute">
-				把设置、记录和所有照片打成一个 zip。换手机时在新手机上用「从文件恢复」导入它，
-				照片就一起过去了。不带照片的普通备份在新手机上会显示一片空白。
+				把设置、记录和所有照片装进一个备份文件。换手机时在新手机上用「从文件恢复」导入它，
+				照片就一起过去了。这个目录在部分手机上文件管理器看不到，那就用「分享刚导出的备份」发出去。
 			</text>
 			<view class="row-btns">
 				<view class="btn btn-ghost grow" @click="doFullBackup">导出完整备份</view>
 				<view class="btn btn-ghost grow" @click="doFullRestore">从文件恢复</view>
+			</view>
+			<view v-if="lastBackup" class="row-btns mt-2">
+				<view class="btn btn-ghost grow" @click="shareLastBackup">分享刚导出的备份</view>
 			</view>
 
 			<!-- 本机自动备份：清空与覆盖导入都是不可逆的，得留后悔药 -->
@@ -290,6 +293,7 @@ import {
 	listBackupFiles,
 	loadBackupFromFile,
 	pickBackupText,
+	shareFile,
 } from '../../core/backup.js'
 import {
 	applyRestoredBackup,
@@ -651,6 +655,8 @@ async function copyReport() {
 const fullBusy = ref(false)
 const restorePick = ref(false)
 const restoreList = ref([])
+/** 最近一次导出的备份文件（用于「分享备份文件」） */
+const lastBackup = ref(null)
 /** 换行常量：模板字符串里写 \\n 容易被工具链弄坏，统一用这个 */
 const NL = String.fromCharCode(10)
 
@@ -676,6 +682,7 @@ async function doFullBackup() {
 	}
 
 	const res = await exportFullBackupText(built.text, fullBackupFileName())
+	lastBackup.value = res.ok ? { absPath: res.absPath || '', name: fullBackupFileName(), visible: !!res.userVisible } : null
 	uni.hideLoading()
 	fullBusy.value = false
 
@@ -699,16 +706,38 @@ async function doFullBackup() {
 	if (res.userVisible) {
 		uni.showModal({
 			title: '完整备份已导出',
-			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath}${NL}（标「${res.dirLabel}」的目录，文件管理器里能看到）${NL}${NL}换手机时把这个文件拷过去，在新手机上用「从文件恢复」。`,
+			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath || res.where || '浏览器下载'}${NL}（${res.dirLabel}）${NL}${NL}换手机时把这个文件拷过去，在新手机上用「从文件恢复」。`,
 			showCancel: false,
 		})
 	} else {
+		// 私有目录（Android/data/... 下的）：文件管理器看不到，
+		// 所以直接给一个「分享」按钮把它发出去，别让用户对着一个拿不到的文件干瞪眼
 		uni.showModal({
-			title: '已导出（但目录是私有的）',
-			content: `${detail.join(NL)}${NL}${NL}位置：${res.absPath}${NL}${NL}这个目录文件管理器看不到。建议用「分享备份文件」发到微信或网盘，再拷到新手机。`,
-			showCancel: false,
+			title: '已导出',
+			content: `${detail.join(NL)}${NL}${NL}这个位置（${res.dirLabel}）在 Android 11+ 上文件管理器看不到。现在分享出去，存到微信或网盘，换手机时再导回来。`,
+			confirmText: '分享文件',
+			cancelText: '知道了',
+			success: (r) => {
+				if (r.confirm) shareLastBackup()
+			},
 		})
 	}
+}
+
+/** 把最近导出的备份文件分享出去 */
+async function shareLastBackup() {
+	const b = lastBackup.value
+	if (!b || !b.absPath) {
+		uni.showToast({ title: '请先导出一次', icon: 'none' })
+		return
+	}
+	const res = await shareFile(b.absPath, b.name)
+	if (res.ok) return
+	uni.showModal({
+		title: '分享没能打开',
+		content: `${res.error || '未知错误'}${NL}${NL}也可以点「原生能力自检」报告里的「手机公共目录」那条看看能不能换个位置导出。`,
+		showCancel: false,
+	})
 }
 
 /** 确认后恢复（App 与 H5 共用） */

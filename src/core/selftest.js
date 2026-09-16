@@ -93,19 +93,42 @@ export async function runSelfTest() {
 			const r = await PIO.readText(TMP_TEXT)
 			const same = r.ok && r.text === TEST_TEXT
 			add(
-				'plus.io 读文本（readAsText）',
+				'plus.io 读文本',
 				same,
 				same
-					? '读回来的内容与写入的完全一致（含中文）'
+					? `内容与写入完全一致（含中文），走的是「${r.via}」`
 					: r.ok
 						? `内容不一致：读到 ${r.text.length} 字符，期望 ${TEST_TEXT.length}`
 						: r.error
 			)
 		} catch (e) {
-			add('plus.io 读文本（readAsText）', false, String((e && e.message) || e))
+			add('plus.io 读文本', false, String((e && e.message) || e))
 		}
 	} else {
-		add('plus.io 读文本（readAsText）', false, '上一步没写成')
+		add('plus.io 读文本', false, '上一步没写成')
+	}
+
+	/* ---- 公共目录：换手机时文件从这儿进来 ---- */
+	try {
+		const pubs = await PIO.publicDirCandidates()
+		if (!pubs.length) {
+			add(
+				'手机公共目录',
+				null,
+				'读不到公共的下载/文档目录。换手机时请用「分享备份文件」把文件发出去；'
+					+ '从别的手机导回来时，如果这里读不到，就只能靠应用自己的下载目录。'
+			)
+		} else {
+			const list = await PIO.findBackupsAt(pubs[0].abs, 'calorie-backup')
+			add(
+				'手机公共目录',
+				true,
+				`能读 ${pubs.map((p) => p.label).join('、')}`
+					+ (list.length ? `（里面有 ${list.length} 个备份文件）` : '（暂时没有备份文件）')
+			)
+		}
+	} catch (e) {
+		add('手机公共目录', false, String((e && e.message) || e))
 	}
 
 	/* ---- 3. 照片落盘往返（照片就是这么存的） ---- */

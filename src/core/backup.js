@@ -11,9 +11,12 @@ import {
 	_resetOutDirs,
 	absOf,
 	fileSize,
+	fileSizeAt,
 	findBackups,
+	findBackupsAt,
 	hasPlusIo,
 	outDirCandidates,
+	publicDirCandidates,
 	readText,
 	writeTextChecked,
 } from './plusio.js'
@@ -165,6 +168,37 @@ export function shareText(text) {
 			uni.shareWithSystem({
 				type: 'text',
 				summary: text,
+				success: () => resolve({ ok: true }),
+				fail: (e) => resolve({ ok: false, error: (e && e.errMsg) || '分享失败' }),
+			})
+		} catch (e) {
+			resolve({ ok: false, error: '分享调用异常' })
+		}
+	})
+}
+
+/**
+ * 分享一个本地文件（把备份发到微信 / 网盘 / 邮件）。
+ *
+ * 为什么需要它：`_downloads` 在这台设备上是**应用私有**的
+ * （/storage/emulated/0/Android/data/<包名>/downloads），
+ * Android 11+ 的文件管理器根本看不到它 —— 也就是说
+ * 「导出成功」之后，用户其实**拿不到这个文件**。
+ * 系统分享面板是唯一能把它送出去的通道。
+ *
+ * @returns {Promise<{ok:boolean, unsupported?:boolean, error?:string}>}
+ */
+export function shareFile(absPath, filename) {
+	return new Promise((resolve) => {
+		if (typeof uni === 'undefined' || typeof uni.shareWithSystem !== 'function') {
+			resolve({ ok: false, unsupported: true, error: '当前环境不支持系统分享' })
+			return
+		}
+		try {
+			uni.shareWithSystem({
+				type: 'file',
+				summary: filename || '卡路里记录备份',
+				href: absPath,
 				success: () => resolve({ ok: true }),
 				fail: (e) => resolve({ ok: false, error: (e && e.errMsg) || '分享失败' }),
 			})
@@ -349,6 +383,17 @@ export async function listBackupFiles() {
 		seen.add(f.name)
 		const size = await fileSize(f.url)
 		out.push({ ...f, size, dir: '应用私有目录', visible: false })
+	}
+	// ★ 手机公共的下载/文档目录：从微信、网盘下载的备份，或者用数据线
+	//   拷进手机的文件都在那儿（应用私有的 _downloads 里是没有的）。
+	//   换手机时文件正是从这儿进来的。
+	for (const d of await publicDirCandidates()) {
+		for (const f of await findBackupsAt(d.abs, 'calorie-backup')) {
+			if (seen.has(f.name)) continue
+			seen.add(f.name)
+			const size = await fileSizeAt(f.url)
+			out.push({ ...f, size, dir: d.label, visible: true, public: true })
+		}
 	}
 	out.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
 	return { ok: true, files: out }
