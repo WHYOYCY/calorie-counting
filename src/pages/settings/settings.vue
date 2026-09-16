@@ -60,7 +60,10 @@
 
 		<!-- 目标 -->
 		<view class="card">
-			<text class="sec-title">每日目标</text>
+			<view class="sec-head">
+				<text class="sec-title">每日目标</text>
+				<view class="mini-btn" :class="{ on: hasPending }" @click="applyNow">刷新</view>
+			</view>
 
 			<view class="field">
 				<text class="label">热量目标</text>
@@ -68,7 +71,8 @@
 					<input
 						class="input grow num"
 						type="number"
-						:value="form.dailyGoal"
+						:value="goalShown"
+						@input="onGoalInput"
 						@blur="onGoal"
 					/>
 					<text class="suffix">kcal</text>
@@ -90,7 +94,8 @@
 						class="input grow num"
 						type="digit"
 						:disabled="form.autoMacro"
-						:value="macroInputs.protein"
+						:value="macroShown('protein')"
+						@input="onMacroInput('protein', $event)"
 						@blur="onMacro('protein', $event)"
 					/>
 					<text class="suffix">g</text>
@@ -103,7 +108,8 @@
 						class="input grow num"
 						type="digit"
 						:disabled="form.autoMacro"
-						:value="macroInputs.fat"
+						:value="macroShown('fat')"
+						@input="onMacroInput('fat', $event)"
 						@blur="onMacro('fat', $event)"
 					/>
 					<text class="suffix">g</text>
@@ -116,7 +122,8 @@
 						class="input grow num"
 						type="digit"
 						:disabled="form.autoMacro"
-						:value="macroInputs.carbs"
+						:value="macroShown('carbs')"
+						@input="onMacroInput('carbs', $event)"
 						@blur="onMacro('carbs', $event)"
 					/>
 					<text class="suffix">g</text>
@@ -182,7 +189,7 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
-import { DEFAULT_BASE_URL, MODELS } from '../../core/constants.js'
+import { DEFAULT_BASE_URL, MODELS, MACRO_RATIO } from '../../core/constants.js'
 import { getSettings, saveSettings, allRecords, exportAll, importAll, clearAll } from '../../core/db.js'
 import { macroGoalsFromKcal } from '../../core/nutrition.js'
 import { backupFileName, copyText, writeBackupFile } from '../../core/backup.js'
@@ -194,6 +201,92 @@ const importing = ref(false)
 const importText = ref('')
 const recordCount = ref(0)
 const form = reactive({ ...getSettings() })
+
+/* ---------------- 每日目标：待提交的输入 ---------------- */
+
+/**
+ * 还没落库的输入文本（key 不存在 = 该字段没有待提交改动）。
+ *
+ * 为什么需要它：input 只绑了 @blur，而手机上失焦得额外点一下别处。
+ * 用户改完热量目标，下方的营养素推导值不会跟着动，也看不出到底
+ * 有没有生效。把编辑中的文本单独存一份，点「刷新」就能立即提交并重算。
+ */
+const pending = reactive({})
+const MACRO_KEYS = Object.keys(MACRO_RATIO)
+
+/** 显示值：有待提交的文本就用它，否则用已保存的值 */
+const goalShown = computed(() =>
+	'dailyGoal' in pending ? pending.dailyGoal : form.dailyGoal
+)
+
+function macroShown(key) {
+	return key in pending ? pending[key] : macroInputs.value[key]
+}
+
+/** 有改动还没落库 —— 用来把「刷新」按钮点亮，提示用户可以点 */
+const hasPending = computed(() => {
+	if ('dailyGoal' in pending && String(pending.dailyGoal) !== String(form.dailyGoal)) {
+		return true
+	}
+	// 自动分配模式下三个营养素只是推导值的展示，不算用户输入
+	if (!form.autoMacro) {
+		for (const k of MACRO_KEYS) {
+			if (k in pending && String(pending[k]) !== String(form.macroGoals[k])) return true
+		}
+	}
+	return false
+})
+
+function onGoalInput(e) {
+	pending.dailyGoal = e.detail.value
+}
+
+function onMacroInput(key, e) {
+	pending[key] = e.detail.value
+}
+
+function clearPending() {
+	for (const k of Object.keys(pending)) delete pending[k]
+}
+
+/**
+ * 「刷新」：把当前输入（含还没失焦提交的）立即落库并重算营养素。
+ * 没有改动时也点得，只是提示一句「已是最新」。
+ */
+function applyNow() {
+	const patch = {}
+
+	if ('dailyGoal' in pending) {
+		const v = Math.max(0, Math.round(Number(pending.dailyGoal) || 0))
+		delete pending.dailyGoal
+		if (!v) {
+			uni.showToast({ title: '请输入有效目标', icon: 'none' })
+			return
+		}
+		if (v !== form.dailyGoal) patch.dailyGoal = v
+	}
+
+	if (!form.autoMacro) {
+		const next = { ...form.macroGoals }
+		let touched = false
+		for (const k of MACRO_KEYS) {
+			if (!(k in pending)) continue
+			const v = Math.max(0, Number(pending[k]) || 0)
+			delete pending[k]
+			if (v !== next[k]) {
+				next[k] = v
+				touched = true
+			}
+		}
+		if (touched) patch.macroGoals = next
+	}
+
+	if (!Object.keys(patch).length) {
+		uni.showToast({ title: '已是最新', icon: 'none' })
+		return
+	}
+	commit(patch, '已更新')
+}
 
 const modelLabels = computed(() => MODELS.map((m) => `${m.label} · ${m.hint}`))
 const modelIndex = computed(() => {
@@ -212,6 +305,9 @@ const macroInputs = computed(() => {
 })
 
 function refresh() {
+	// 重新从存储读，待提交的编辑随之作废
+	// （否则输入框会停在旧文本上，和 form 里的值对不上）
+	clearPending()
 	Object.assign(form, getSettings())
 	recordCount.value = allRecords().length
 }
@@ -275,6 +371,7 @@ function onBaseUrl(e) {
 
 function onGoal(e) {
 	const v = Math.max(0, Math.round(Number(e.detail.value) || 0))
+	delete pending.dailyGoal
 	if (!v) {
 		uni.showToast({ title: '请输入有效目标', icon: 'none' })
 		Object.assign(form, getSettings())
@@ -285,6 +382,7 @@ function onGoal(e) {
 
 function onMacro(key, e) {
 	const v = Math.max(0, Number(e.detail.value) || 0)
+	delete pending[key]
 	commit({ macroGoals: { ...form.macroGoals, [key]: v } })
 }
 
@@ -373,6 +471,42 @@ function doClear() {
 	}
 
 	/* ---------- 分区标题 ---------- */
+	.sec-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: $s-3;
+	}
+
+	/* 卡片标题行右侧的小按钮：比全局 .btn 矮一半，不抢卡片主体 */
+	.mini-btn {
+		height: 52rpx;
+		padding: 0 24rpx;
+		border-radius: $r-pill;
+		background: $c-fill;
+		color: $c-text-sub;
+		font-size: 23rpx;
+		font-weight: 500;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: background 0.15s, color 0.15s;
+	}
+
+	.mini-btn:active {
+		opacity: 0.8;
+	}
+
+	/* 有改动没落库时点亮，提示「这里可以点」 */
+	.mini-btn.on {
+		background: $c-primary-weak;
+		color: $c-primary-dark;
+	}
+
+	.sec-head .sec-title {
+		margin-bottom: 0;
+	}
+
 	.sec-title {
 		display: block;
 		font-size: 25rpx;
