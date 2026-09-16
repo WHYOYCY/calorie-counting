@@ -16,42 +16,14 @@ import { SCHEMA_VERSION, DEFAULT_SETTINGS, MEAL_KEYS } from './constants.js'
 import { dateKey, mealOfTs } from './date.js'
 import { round } from './nutrition.js'
 import { deletePhotoFile } from './photo.js'
+import { readRaw, writeRaw } from './storage.js'
+import { saveSnapshot } from './backup.js'
 
 const K_META = 'cc_meta'
 const K_RECORDS = 'cc_records'
 const K_SETTINGS = 'cc_settings'
 
 /* ---------------- 底层读写（特性探测，Node 可测） ---------------- */
-
-function hasStorage() {
-	return (
-		typeof uni !== 'undefined' &&
-		!!uni &&
-		typeof uni.getStorageSync === 'function' &&
-		typeof uni.setStorageSync === 'function'
-	)
-}
-
-function readRaw(key, fallback) {
-	if (!hasStorage()) return fallback
-	try {
-		const v = uni.getStorageSync(key)
-		if (v === '' || v === null || v === undefined) return fallback
-		return typeof v === 'string' ? JSON.parse(v) : v
-	} catch (e) {
-		return fallback
-	}
-}
-
-function writeRaw(key, value) {
-	if (!hasStorage()) return false
-	try {
-		uni.setStorageSync(key, JSON.stringify(value))
-		return true
-	} catch (e) {
-		return false
-	}
-}
 
 /** 删除照片文件（缺口 A4：删除记录时连带清理，否则沙箱被垃圾图撑爆） */
 function removePhotoFile(path) {
@@ -281,6 +253,8 @@ export function importAll(payload, mode = 'merge') {
 		.filter(isValidRecord)
 		.map((r) => normalizeRecord(r, { keepStamps: true }))
 	if (mode === 'replace') {
+		// 覆盖导入同样不可逆，先把当前状态存一份
+		saveSnapshot(exportAll(), { force: true })
 		for (const r of loadRecords()) removePhotoFile(r.photo)
 		recordCache = incoming
 	} else {
@@ -297,8 +271,14 @@ export function importAll(payload, mode = 'merge') {
 	return { ok: true, imported: incoming.length, total: loadRecords().length }
 }
 
-/** 清空全部记录（连同照片文件） */
+/**
+ * 清空全部记录（连同照片文件）。
+ *
+ * 清空前先存一份快照 —— 这是个不可逆操作，得给用户留后悔药。
+ * 用 force 保证同一天内再清一次也仍能把「清之前」的状态存下来。
+ */
 export function clearAll() {
+	saveSnapshot(exportAll(), { force: true })
 	for (const r of loadRecords()) removePhotoFile(r.photo)
 	recordCache = []
 	persistRecords()

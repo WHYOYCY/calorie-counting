@@ -60,6 +60,14 @@ import {
 	chartData,
 } from '../src/core/stats.js'
 import { DEFAULT_DAILY_GOAL } from '../src/core/constants.js'
+import {
+	saveSnapshot,
+	listSnapshots,
+	readSnapshot,
+	latestSnapshot,
+	clearSnapshots,
+	SNAPSHOT_KEEP,
+} from '../src/core/backup.js'
 import { photoPathFor, photoSrc, deletePhotoFile, splitDataUrl } from '../src/core/photo.js'
 import {
 	RECOGNITION_PROMPT,
@@ -791,6 +799,93 @@ ok(true, '六种路径形式调用均未抛异常')
 eq(splitDataUrl('data:image/png;base64,QUJD').mime, 'image/png', 'data URL 解析出 mime')
 eq(splitDataUrl('data:image/png;base64,QUJD').base64, 'QUJD', 'data URL 解析出 base64')
 eq(splitDataUrl('garbage').base64, '', '非法 data URL 返回空')
+
+/* ========== 本地快照：不可逆操作的后悔药 ========== */
+group('backup.js · 本地快照')
+
+freshStorage()
+const DAY = 24 * 3600 * 1000
+const D0 = T(2026, 9, 10, 12, 0)
+const payloadOf = (n) => ({
+	app: 'calorie-counting',
+	schemaVersion: 1,
+	exportedAt: D0,
+	settings: {},
+	records: Array.from({ length: n }, (_, i) => ({ id: 'r' + i })),
+})
+
+eq(listSnapshots().length, 0, '初始没有快照')
+
+const s1 = saveSnapshot(payloadOf(2), { now: D0 })
+eq(s1.ok, true, '存快照成功')
+eq(listSnapshots().length, 1, '清单里有 1 份')
+eq(readSnapshot(s1.ts).records.length, 2, '能把内容读回来')
+
+eq(typeof latestSnapshot().ts, 'number', 'latestSnapshot 带索引信息（ts）')
+eq(latestSnapshot().records, 2, '索引里带记录条数，界面直接用不用读快照')
+eq(latestSnapshot().payload.records.length, 2, 'latestSnapshot 带 payload')
+
+// 同一天不重复存（避免每次启动都写一遍）
+const s2 = saveSnapshot(payloadOf(2), { now: D0 + 3600 * 1000 })
+eq(s2.skipped, true, '同一天不重复存')
+eq(listSnapshots().length, 1, '仍然只有 1 份')
+
+// 不可逆操作要 force，即使当天已存也要再存一份
+const s3 = saveSnapshot(payloadOf(3), { now: D0 + 2 * 3600 * 1000, force: true })
+eq(!!s3.skipped, false, 'force 忽略当天去重')
+eq(listSnapshots().length, 1, '同一天的旧快照被替换，仍只 1 份')
+eq(latestSnapshot().payload.records.length, 3, '拿到的是最新那份')
+eq(s3.ts === s1.ts, false, '两次快照的时间戳不撞车')
+
+// 跨天累计 + 滚动删除
+saveSnapshot(payloadOf(4), { now: D0 + DAY })
+saveSnapshot(payloadOf(5), { now: D0 + 2 * DAY })
+eq(listSnapshots().length, 3, `跨天累计到 ${SNAPSHOT_KEEP} 份`)
+const oldestTs = listSnapshots()[2].ts
+saveSnapshot(payloadOf(6), { now: D0 + 3 * DAY })
+eq(listSnapshots().length, SNAPSHOT_KEEP, '超过保留数后不再增长')
+eq(readSnapshot(oldestTs), null, '被轮换掉的旧快照已从存储里删除')
+eq(latestSnapshot().payload.records.length, 6, '最新一份是刚存的')
+eq(
+	listSnapshots().map((s) => s.ts).every((v, i, a) => i === 0 || a[i - 1] > v),
+	true,
+	'清单按时间倒序'
+)
+
+// 体积上限：太大就不存，宁可没有快照也不能把存储写满
+const tooBig = saveSnapshot({ records: [{ big: 'x'.repeat(1024 * 1024 + 10) }] })
+eq(tooBig.ok, false, '超过体积上限拒绝存')
+
+eq(
+	(typeof tooBig.error === 'string' ? tooBig.error : '').indexOf('太大') >= 0,
+	true,
+	'给出「太大」而不是静默失败'
+)
+
+clearSnapshots()
+eq(listSnapshots().length, 0, 'clearSnapshots 清空清单')
+eq(latestSnapshot(), null, '清空后 latestSnapshot 为 null')
+
+group('db.js · 清空/覆盖前自动留档')
+
+freshStorage()
+initDB()
+clearSnapshots()
+saveRecord({ ts: T(2026, 9, 13, 8, 30), items: [rice] })
+saveRecord({ ts: T(2026, 9, 13, 12, 30), items: [rice] })
+const beforeClear = allRecords().length
+eq(beforeClear, 2, '先有 2 条记录')
+
+clearAll()
+eq(allRecords().length, 0, '清空后没有记录')
+const snap = latestSnapshot()
+ok(!!snap, '★ 清空前自动存了一份快照')
+eq(snap.payload.records.length, 2, '快照里正是被清掉的那 2 条')
+
+// 用快照恢复
+const restored = importAll(snap.payload, 'replace')
+eq(restored.ok, true, '从快照恢复成功')
+eq(allRecords().length, 2, '★ 记录回来了')
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

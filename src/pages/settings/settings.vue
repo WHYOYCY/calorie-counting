@@ -140,6 +140,29 @@
 				<view class="btn btn-plain grow" @click="doExport">导出备份</view>
 				<view class="btn btn-plain grow" @click="openImport">导入备份</view>
 			</view>
+
+			<!-- 本机自动备份：清空与覆盖导入都是不可逆的，得留后悔药 -->
+			<view class="sub-head between">
+				<text class="sub-title">本机自动备份</text>
+				<text class="t-xs t-mute">
+					{{ snapshots.length ? `保留最近 ${SNAPSHOT_KEEP} 份` : '暂无' }}
+				</text>
+			</view>
+			<text v-if="!snapshots.length" class="hint t-xs t-mute">
+				清空记录或覆盖导入前会自动把当前数据存一份到这里，可以随时恢复。
+			</text>
+			<view v-else class="snap-list">
+				<view v-for="s in snapshots" :key="s.ts" class="snap-item">
+					<view class="grow">
+						<text class="t-sm">{{ s.day }} {{ snapTime(s.ts) }}</text>
+						<text class="t-xs t-mute snap-meta">
+							{{ s.records }} 条 · {{ snapSize(s.bytes) }}
+						</text>
+					</view>
+					<view class="mini-btn" @click="doRestore(s)">恢复</view>
+				</view>
+			</view>
+
 			<view class="btn btn-danger clear-btn" @click="doClear">清空全部记录</view>
 		</view>
 
@@ -169,6 +192,7 @@
 		<view class="dialog" @click.stop>
 			<text class="dialog-title">导入备份</text>
 			<text class="hint t-xs t-mute">把之前导出的 JSON 粘贴到这里</text>
+			<view class="clip-btn" @click="pasteFromClipboard">从剪贴板读取</view>
 			<textarea
 				class="paste"
 				:value="importText"
@@ -191,8 +215,19 @@ import { computed, reactive, ref } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { DEFAULT_BASE_URL, MODELS, MACRO_RATIO } from '../../core/constants.js'
 import { getSettings, saveSettings, allRecords, exportAll, importAll, clearAll } from '../../core/db.js'
+import { formatTime } from '../../core/date.js'
 import { macroGoalsFromKcal } from '../../core/nutrition.js'
-import { backupFileName, copyText, writeBackupFile } from '../../core/backup.js'
+import {
+	backupFileName,
+	copyText,
+	writeBackupFile,
+	readClipboard,
+	shareText,
+	listSnapshots,
+	readSnapshot,
+	SNAPSHOT_KEEP,
+} from '../../core/backup.js'
+import { probe, saveToDownloads } from '../../core/native-fs.js'
 import { testConnection } from '../../core/ai.js'
 
 const showKey = ref(false)
@@ -200,6 +235,7 @@ const testing = ref(false)
 const importing = ref(false)
 const importText = ref('')
 const recordCount = ref(0)
+const snapshots = ref([])
 const form = reactive({ ...getSettings() })
 
 /* ---------------- 每日目标：待提交的输入 ---------------- */
@@ -310,6 +346,7 @@ function refresh() {
 	clearPending()
 	Object.assign(form, getSettings())
 	recordCount.value = allRecords().length
+	snapshots.value = listSnapshots()
 }
 
 onShow(refresh)
@@ -388,36 +425,183 @@ function onMacro(key, e) {
 
 /* ---------------- 备份 ---------------- */
 
+/**
+ * 导出确认。
+ *
+ * 三条路的适用场景不同，所以让用户选，而不是我自作主张：
+ *   存到下载目录  → 文件管理器 / 插电脑能直接看到（需 Android 10+）
+ *   发送到其他应用 → 微信 / 邮件 / 网盘 / 备忘录
+ *   复制到剪贴板  → 到处都能用，但数据量大时粘贴很痛苦
+ */
 async function doExport() {
 	const payload = exportAll()
 	const json = JSON.stringify(payload)
-	const res = await writeBackupFile(json)
+	const kb = Math.round(json.length / 1024)
 
-	if (res.ok && res.mode === 'file') {
-		const copied = await copyText(json)
-		uni.showModal({
-			title: '备份已导出',
-			content: `文件：${backupFileName()}\n（应用私有目录）${copied.ok ? '\n\n备份内容已同时复制到剪贴板。' : ''}`,
-			showCancel: false,
-			confirmText: '好',
-		})
-		return
-	}
+	// 按平台给不同选项：H5 的浏览器下载是最好用的，App 上没这个东西；
+	// 而 App 上「写入应用私有目录」恰恰是用户拿不到文件的那个坑，不再当选项摆出来。
+	const p = probe()
+	const isH5 = typeof document !== 'undefined'
+	const opts = p.isAndroid
+		? ['存到「下载」目录', '发送到其他应用', '复制到剪贴板']
+		: isH5
+			? ['下载文件', '复制到剪贴板']
+			: ['保存到应用目录', '复制到剪贴板']
+
+	uni.showActionSheet({
+		title: `备份 ${kb} KB`,
+		itemList: opts,
+		success: (r) => {
+			const pick = opts[r.tapIndex]
+			if (pick === '存到「下载」目录') exportToDownloads(json)
+			else if (pick === '发送到其他应用') exportViaShare(json)
+			else if (pick === '下载文件' || pick === '保存到应用目录') exportViaFile(json)
+			else exportViaClipboard(json, false)
+		},
+	})
+}
+
+/** H5 浏览器下载 / App 私有目录（iOS 等没有 MediaStore 的平台） */
+async function exportViaFile(json) {
+	const res = await writeBackupFile(json)
 	if (res.ok && res.mode === 'download') {
 		uni.showToast({ title: '已开始下载', icon: 'success' })
 		return
 	}
-	// 兜底：剪贴板
-	const copied = await copyText(json)
-	if (copied.ok) {
+	if (res.ok) {
 		uni.showModal({
-			title: '已复制到剪贴板',
-			content: '当前环境无法直接写文件，备份 JSON 已复制，请粘贴保存。',
+			title: '备份已写出',
+			content: `文件：${backupFileName()}\n位置：${res.path || '应用私有目录'}`,
 			showCancel: false,
 		})
-	} else {
-		uni.showToast({ title: '导出失败', icon: 'none' })
+		return
 	}
+	showExportError('写入文件失败', res.error, json)
+}
+
+/** 存到公共「下载」目录（Android 10+） */
+async function exportToDownloads(json) {
+	const name = backupFileName()
+	uni.showLoading({ title: '写入中…', mask: true })
+	const res = await saveToDownloads(json, name)
+	uni.hideLoading()
+
+	if (res.ok) {
+		uni.showModal({
+			title: '已保存',
+			content: `位置：${res.where}\n\n打开「文件管理」或在电脑上接 USB，在下载目录里就能找到它。`,
+			showCancel: false,
+		})
+		return
+	}
+
+	if (res.unsupported) {
+		uni.showToast({ title: res.error || '当前平台不支持', icon: 'none' })
+		return
+	}
+
+	// 失败要把原因摆出来 —— 这条路只能在真机验证，需要用户把报错告诉我
+	showExportError('保存到下载目录失败', res.error, json)
+}
+
+/** 走系统分享面板（只能发文本） */
+async function exportViaShare(json) {
+	const res = await shareText(json)
+	if (res.ok) return
+	if (res.unsupported) {
+		uni.showToast({ title: res.error || '当前平台不支持分享', icon: 'none' })
+		return
+	}
+	showExportError('分享失败', res.error, json)
+}
+
+/** 剪贴板：各端通用兜底 */
+async function exportViaClipboard(json, quiet) {
+	const copied = await copyText(json)
+	if (!copied.ok) {
+		uni.showToast({ title: '复制失败', icon: 'none' })
+		return
+	}
+	if (quiet) return
+	uni.showModal({
+		title: '已复制到剪贴板',
+		content: `${Math.round(json.length / 1024)} KB 的备份 JSON 已复制，粘贴到备忘录或聊天窗口保存。`,
+		showCancel: false,
+	})
+}
+
+/** 导出失败：把诊断信息一并给出，方便排查（这条路只能真机验） */
+function showExportError(title, error, json) {
+	const p = probe()
+	const detail = [
+		`原因：${error || '未知'}`,
+		`Android 版本：${p.isAndroid ? 'API ' + p.sdk : '非 Android'}`,
+		`MediaStore 可用：${p.canSaveToDownloads ? '是' : '否'}`,
+		`系统分享可用：${p.canShare ? '是' : '否'}`,
+	].join('\n')
+
+	uni.showModal({
+		title,
+		content: `${detail}\n\n要改成复制到剪贴板吗？`,
+		confirmText: '复制备份',
+		cancelText: '好',
+		success: (r) => {
+			if (r.confirm) exportViaClipboard(json, false)
+		},
+	})
+}
+
+/* ---------------- 本机自动备份 ---------------- */
+
+function snapTime(ts) {
+	return formatTime(ts)
+}
+
+function snapSize(bytes) {
+	const kb = Number(bytes || 0) / 1024
+	return kb < 1 ? `${Number(bytes || 0)} B` : `${kb.toFixed(kb < 10 ? 1 : 0)} KB`
+}
+
+function doRestore(s) {
+	const payload = readSnapshot(s.ts)
+	if (!payload) {
+		uni.showToast({ title: '这份备份读不出来了', icon: 'none' })
+		refresh()
+		return
+	}
+	uni.showModal({
+		title: '恢复这份备份？',
+		content: `${s.day} 的备份将覆盖当前全部记录。当前数据也会先自动存一份，还能再退回来。`,
+		confirmText: '恢复',
+		success: (r) => {
+			if (!r.confirm) return
+			const res = importAll(payload, 'replace')
+			if (!res.ok) {
+				uni.showToast({ title: res.error || '恢复失败', icon: 'none' })
+				return
+			}
+			refresh()
+			uni.showModal({
+				title: '已恢复',
+				content: `当前共 ${res.total} 条记录。`,
+				showCancel: false,
+			})
+		},
+	})
+}
+
+async function pasteFromClipboard() {
+	const res = await readClipboard()
+	if (!res.ok) {
+		uni.showToast({ title: res.error || '读取剪贴板失败', icon: 'none' })
+		return
+	}
+	if (!String(res.text || '').trim()) {
+		uni.showToast({ title: '剪贴板里没有内容', icon: 'none' })
+		return
+	}
+	importText.value = String(res.text).trim()
+	uni.showToast({ title: '已读取', icon: 'none' })
 }
 
 function openImport() {
@@ -452,14 +636,14 @@ function doImport(mode) {
 function doClear() {
 	uni.showModal({
 		title: '清空全部记录？',
-		content: '所有记录与照片都会被删除，且无法恢复。建议先导出备份。',
+		content: '所有记录与照片都会被删除。清空前会自动在本机存一份备份，可以恢复。',
 		confirmText: '清空',
 		confirmColor: '#c97b6e',
 		success: (res) => {
 			if (!res.confirm) return
 			clearAll()
 			refresh()
-			uni.showToast({ title: '已清空', icon: 'success' })
+			uni.showToast({ title: '已清空，可在本机备份里恢复', icon: 'none' })
 		},
 	})
 }
@@ -597,6 +781,54 @@ function doClear() {
 
 	.clear-btn {
 		margin-top: $s-2;
+	}
+
+	/* ---------- 本机自动备份 ---------- */
+	.sub-head {
+		margin-top: $s-4;
+		margin-bottom: $s-2;
+	}
+
+	.sub-title {
+		font-size: 25rpx;
+		color: $c-text-sub;
+	}
+
+	.snap-list {
+		margin-top: $s-1;
+	}
+
+	.snap-item {
+		display: flex;
+		align-items: center;
+		padding: 14rpx 0;
+		border-top: 2rpx solid $c-line;
+	}
+
+	.snap-item:first-child {
+		border-top: 0;
+	}
+
+	.snap-meta {
+		display: block;
+		margin-top: 4rpx;
+	}
+
+	.clip-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		height: 60rpx;
+		margin-top: $s-2;
+		border-radius: $r-sm;
+		background: $c-primary-weak;
+		color: $c-primary-dark;
+		font-size: 24rpx;
+		font-weight: 500;
+	}
+
+	.clip-btn:active {
+		opacity: 0.8;
 	}
 
 	/* ---------- 关于 ---------- */
