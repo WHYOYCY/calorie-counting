@@ -1536,6 +1536,206 @@ eq(FBIO.humanSize(2048), '2.0 KB', '体积格式化：KB')
 eq(FBIO.humanSize(5 * 1024 * 1024), '5.0 MB', '体积格式化：MB')
 ok(FBIO.fullBackupFileName().indexOf('full.zip') > 0, `文件名带 full 后缀：${FBIO.fullBackupFileName()}`)
 
+/* ========== Native.js 写二进制：不用 Blob ========== */
+
+/**
+ * 假 Java 文件系统。
+ * 关键：getBytes('ISO-8859-1') 要**忠实模拟 Java 的编码**
+ * （每个码点 → 一个字节），否则测不出 latin1 过桥到底对不对。
+ */
+function fakeJavaFs(opts = {}) {
+	const files = new Map()
+	const dirs = new Set()
+	const calls = []
+
+	const impl = {
+		jstring: {
+			getBytes: (o) => {
+				if (opts.getBytesNull) return null
+				const s = o.s
+				const out = new Uint8Array(s.length)
+				for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff
+				return out
+			},
+		},
+		fos: {
+			write: (o, bytes) => {
+				if (opts.writeThrows) throw new Error('write 失败')
+				const list = files.get(o.path) || []
+				for (let i = 0; i < bytes.length; i++) list.push(bytes[i])
+				files.set(o.path, list)
+			},
+			flush: () => {},
+			close: () => {},
+		},
+		file: {
+			exists: (o) => files.has(o.path) || dirs.has(o.path),
+			mkdirs: (o) => {
+				dirs.add(o.path)
+				return true
+			},
+		},
+	}
+
+	const classes = {
+		'java.lang.String': function JString(s) {
+			return { _kind: 'jstring', s: String(s) }
+		},
+		'java.io.FileOutputStream': function FileOutputStream(p) {
+			if (opts.openThrows) throw new Error('open 失败')
+			if (!files.has(p)) files.set(p, [])
+			return { _kind: 'fos', path: p }
+		},
+		'java.io.File': function File(p) {
+			return { _kind: 'file', path: p }
+		},
+	}
+
+	const android = {
+		importClass: (name) => {
+			calls.push(name)
+			if (opts.importNullFor === name) return null
+			return classes[name] || {}
+		},
+		invoke: function (obj, name) {
+			const args = Array.prototype.slice.call(arguments, 2)
+			if (obj && typeof obj[name] === 'function') return obj[name].apply(obj, args)
+			const fn = impl[obj && obj._kind] && impl[obj && obj._kind][name]
+			if (!fn) throw new Error(`${obj && obj._kind}.${name} is not a function`)
+			return fn.apply(null, [obj].concat(args))
+		},
+		getAttribute: (cls, name) => (cls ? cls[name] : null),
+		runtimeMainActivity: () => ({}),
+	}
+
+	const plusLike = {
+		android,
+		io: {
+			convertLocalFileSystemURL: (u) => 'ABS:/' + String(u).replace(/\/$/, ''),
+		},
+	}
+	return { plus: plusLike, files, dirs, calls }
+}
+
+const withJavaFs = async (opts, fn) => {
+	const env = fakeJavaFs(opts)
+	globalThis.plus = env.plus
+	try {
+		return await fn(env)
+	} finally {
+		delete globalThis.plus
+	}
+}
+
+const NFS = await import('../src/core/native-fs.js')
+
+group('native-fs.js · 写二进制不用 Blob（真机报过「内核不支持 Blob」）')
+
+eq(typeof Blob, 'function', 'Node 里是有 Blob 的 —— 所以必须靠假环境才能测出 App 上的问题')
+
+// 含全部 256 种字节值：latin1 过桥只要错一个字节就会被抓出来
+const ALL_BYTES = new Uint8Array(256)
+for (let i = 0; i < 256; i++) ALL_BYTES[i] = i
+
+await withJavaFs({}, async (env) => {
+	const res = await NFS.writeFileBytes('ABS:/tmp/a.zip', [ALL_BYTES])
+	eq(res.ok, true, '写入成功')
+	eq(res.bytes, 256, '字节数对')
+	const got = env.files.get('ABS:/tmp/a.zip')
+
+eq(got.length, 256, '文件里确实是 256 字节')
+
+eq(
+		got.map((b) => String(b).padStart(3, '0')).join(','),
+		[...ALL_BYTES].map((b) => String(b).padStart(3, '0')).join(','),
+		'★ 全部 256 种字节值逐字节一致（ISO-8859-1 过桥无损）'
+	)
+	ok(String(res.trace).indexOf('ISO') < 0, 'trace 不含敏感细节')
+})
+
+// 多块写入（流式）应该拼起来等于完整内容
+await withJavaFs({}, async (env) => {
+	const a = new Uint8Array([1, 2, 3])
+	const b = new Uint8Array(0)
+	const c = new Uint8Array([255, 0, 128, 64])
+	const res = await NFS.writeFileBytes('ABS:/tmp/b.zip', [a, b, c])
+	eq(res.ok, true, '多块写入成功')
+	eq(res.bytes, 7, '空块不计入字节数')
+	eq(env.files.get('ABS:/tmp/b.zip').join(','), '1,2,3,255,0,128,64', '★ 多块按顺序拼接正确')
+})
+
+// 异步迭代器（真正打包时用的是 zipChunks 这个 async generator）
+await withJavaFs({}, async (env) => {
+	const res = await NFS.writeFileBytes('ABS:/tmp/c.zip', [ALL_BYTES.subarray(0, 10)])
+	eq(res.ok, true, '接受数组形式的块')
+})
+
+group('native-fs.js · 写文件的失败路径')
+
+await withJavaFs({ getBytesNull: true }, async () => {
+	const res = await NFS.writeFileBytes('ABS:/tmp/d.zip', [ALL_BYTES])
+	eq(res.ok, false, 'getBytes 返回空 → 失败')
+	ok(String(res.error).indexOf('字节转换') >= 0, `给出可读原因：${res.error}`)
+})
+
+await withJavaFs({ writeThrows: true }, async () => {
+	const res = await NFS.writeFileBytes('ABS:/tmp/e.zip', [ALL_BYTES])
+	eq(res.ok, false, 'write 抛异常 → 失败而不是崩')
+})
+
+await withJavaFs({ importNullFor: 'java.io.FileOutputStream' }, async () => {
+	const res = await NFS.writeFileBytes('ABS:/tmp/f.zip', [ALL_BYTES])
+	eq(res.ok, false, 'importClass 返回空 → 失败')
+	ok(String(res.error).indexOf('链入') >= 0, `提示基座问题：${res.error}`)
+})
+
+group('native-fs.js · 把 Blob 拿掉再写一遍（模拟 App 逻辑层）')
+
+await withJavaFs({}, async (env) => {
+	const saved = globalThis.Blob
+	delete globalThis.Blob
+	try {
+		eq(typeof Blob, 'undefined', '确认当前环境已经没有 Blob 了')
+		const res = await NFS.writePrivateFile(ALL_BYTES, 'noblob.zip')
+		eq(res.ok, true, '★ 没有 Blob 也能写（真机报的「内核不支持 Blob」就是这条路）')
+		eq(
+			env.files.get('ABS:/_doc/noblob.zip').length,
+			256,
+			'★ 内容逐字节完整'
+		)
+		const photo = await NFS.writePhotoFile(new Uint8Array([7, 6, 5]), 'p.jpg')
+		eq(photo.ok, true, '★ 没 Blob 也能写照片（恢复备份要用）')
+	} finally {
+		globalThis.Blob = saved
+	}
+})
+
+group('native-fs.js · 私有文件与照片写入')
+
+await withJavaFs({}, async (env) => {
+	const res = await NFS.writePrivateFile(ALL_BYTES, 'bak.zip')
+	eq(res.ok, true, '写私有文件成功')
+	eq(res.path, '_doc/bak.zip', '返回可用的相对路径')
+	eq(env.files.get('ABS:/_doc/bak.zip').length, 256, '内容进了正确的位置')
+})
+
+await withJavaFs({}, async (env) => {
+	const res = await NFS.writePhotoFile(new Uint8Array([9, 8, 7]), 'food_1.jpg')
+	eq(res.ok, true, '写照片成功')
+	eq(res.path, '_doc/food/food_1.jpg', '照片路径对')
+	eq(env.files.get('ABS:/_doc/food/food_1.jpg').join(','), '9,8,7', '照片字节对')
+	ok(
+		env.dirs.has('ABS:/_doc/food') || env.dirs.size > 0,
+		'★ 先建了照片目录（FileOutputStream 不会自动建目录）'
+	)
+})
+
+eq(
+	(await withJavaFs({}, () => NFS.writePrivateFile(new Uint8Array([1]), 'x.zip'))).ok,
+	true,
+	'没有 plus.io 也能拿到路径（走 convertLocalFileSystemURL）'
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${pass} 项，失败 ${fail} 项`)

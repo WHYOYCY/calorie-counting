@@ -226,61 +226,133 @@ export function hasPlus() {
 	return typeof plus !== 'undefined' && !!plus
 }
 
+/** 本地 URL（_doc/x）→ 平台绝对路径 */
+function absPathOf(localUrl) {
+	if (!hasPlus() || !plus.io || typeof plus.io.convertLocalFileSystemURL !== 'function') {
+		return ''
+	}
+	try {
+		return plus.io.convertLocalFileSystemURL(localUrl) || ''
+	} catch (e) {
+		return ''
+	}
+}
+
 /**
- * 用 plus.io 把字节写进应用私有目录，返回 _doc 下的相对路径。
- *
- * 只能传 Blob：write() 若传字符串会把二进制弄坏。
- * 先落私有目录而不是直接写公共目录，是因为 plus.io 能稳定写私有目录，
- * 而公共目录必须走 MediaStore —— 那就得把二进制经过 JS 桥，很容易出错。
- * 所以流程是：plus.io 写私有 → 原生 FileUtils.copy 到公共下载。
+ * 字节 → ISO-8859-1 字符串（U+0000~U+00FF 与字节一一映射）。
+ * 分块拼，避免超长字符串拼接退化。
  */
-export function writePrivateFile(bytes, filename) {
-	return new Promise((resolve) => {
-		if (!hasPlus() || !plus.io || !plus.io.requestFileSystem) {
-			resolve({ ok: false, unsupported: true, error: '当前平台不支持写文件' })
-			return
+function bytesToLatin1(bytes) {
+	let s = ''
+	const CH = 8192
+	for (let i = 0; i < bytes.length; i += CH) {
+		s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CH, bytes.length)))
+	}
+	return s
+}
+
+/** 建目录（已存在就算了） */
+function ensureDir(absDir) {
+	try {
+		const File = plus.android.importClass('java.io.File')
+		if (!File) return { ok: false, error: 'importClass 返回空（File）' }
+		const f = new File(absDir)
+		if (!callJava(f, 'exists')) callJava(f, 'mkdirs')
+		return { ok: true }
+	} catch (e) {
+		return { ok: false, error: String((e && e.message) || e) }
+	}
+}
+
+/**
+ * 把字节流写进一个绝对路径的文件。
+ *
+ * 为什么不用 plus.io 的 FileWriter.write(Blob)：uni-app **App 端的页面 JS
+ * 跑在逻辑层 JS 引擎里，不是浏览器环境** —— 没有 document / window / Blob
+ * （真机报「当前内核不支持 Blob」就是这个原因）。所以那条路在 App 上走不通。
+ *
+ * 二进制怎么过桥：把每个字节编码成 ISO-8859-1 字符串（U+0000~U+00FF
+ * 是一一映射，往返无损），再 new java.lang.String(…).getBytes('ISO-8859-1')。
+ * 这是 Native.js 里传二进制的可靠办法。
+ *
+ * @param {string} absPath 平台绝对路径
+ * @param {AsyncIterable<Uint8Array>|Uint8Array[]} chunks 按顺序写入的字节块
+ */
+export async function writeFileBytes(absPath, chunks) {
+	const trace = []
+	if (!isAndroid()) {
+		return { ok: false, unsupported: true, error: '当前平台不是 Android' }
+	}
+	let out = null
+	try {
+		trace.push('importClass')
+		const FileOutputStream = plus.android.importClass('java.io.FileOutputStream')
+		const JString = plus.android.importClass('java.lang.String')
+		if (!FileOutputStream || !JString) {
+			throw new Error('importClass 返回空（基座可能没链入 java.io）')
 		}
-		if (typeof Blob === 'undefined') {
-			resolve({ ok: false, error: '当前内核不支持 Blob，无法写二进制文件' })
-			return
-		}
-		try {
-			plus.io.requestFileSystem(
-				plus.io.PRIVATE_DOC,
-				(fs) => {
-					fs.root.getFile(
-						filename,
-						{ create: true },
-						(entry) => {
-							entry.createWriter(
-								(w) => {
-									w.onwrite = () =>
-										resolve({
-											ok: true,
-											path: entry.fullPath || `_doc/${filename}`,
-										})
-									w.onerror = () => resolve({ ok: false, error: '写入失败' })
-									try {
-										w.write(new Blob([bytes], { type: 'application/zip' }))
-									} catch (e) {
-										resolve({
-											ok: false,
-											error: 'write 调用异常：' + ((e && e.message) || e),
-										})
-									}
-								},
-								() => resolve({ ok: false, error: '无法创建写入器' })
-							)
-						},
-						() => resolve({ ok: false, error: '无法创建文件' })
-					)
-				},
-				() => resolve({ ok: false, error: '无法访问应用目录' })
+
+		trace.push('open')
+		out = new FileOutputStream(absPath)
+
+		let total = 0
+		for await (const chunk of chunks) {
+			if (!chunk || !chunk.length) continue
+			trace.push('encode')
+			const jbytes = callJava(
+				new JString(bytesToLatin1(chunk)),
+				'getBytes',
+				'ISO-8859-1'
 			)
-		} catch (e) {
-			resolve({ ok: false, error: String((e && e.message) || e) })
+			if (!jbytes) throw new Error('字节转换失败（getBytes 返回空）')
+			trace.push('write')
+			callJava(out, 'write', jbytes)
+			total += chunk.length
 		}
-	})
+
+		callJava(out, 'flush')
+		callJava(out, 'close')
+		out = null
+		return { ok: true, bytes: total, trace: trace.join(' → ') }
+	} catch (e) {
+		try {
+			if (out) callJava(out, 'close')
+		} catch (e2) {
+			/* 关不上就算了 */
+		}
+		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
+	}
+}
+
+/**
+ * 把字节写进应用私有目录（_doc），返回可用的相对路径。
+ * 先落私有目录而不是直接写公共目录：公共目录必须走 MediaStore，
+ * 那就得把二进制经过 JS 桥传 byte[]，很容易出错。
+ * 所以流程是：写 _doc → 原生 FileUtils.copy 到公共下载。
+ */
+export async function writePrivateFile(bytes, filename) {
+	// 不再需要 plus.io.requestFileSystem 了：写入改成走 Native.js，
+	// 这里只需要能把 _doc 解析成绝对路径（absPathOf 会检查）
+	if (!hasPlus()) {
+		return { ok: false, unsupported: true, error: '当前平台不支持写文件' }
+	}
+	const abs = absPathOf(`_doc/${filename}`)
+	if (!abs) return { ok: false, error: '拿不到应用目录的绝对路径' }
+	const res = await writeFileBytes(abs, [bytes])
+	if (!res.ok) return res
+	return { ok: true, path: `_doc/${filename}`, trace: res.trace }
+}
+
+/** 把照片字节写进私有目录（恢复备份时用） */
+export async function writePhotoFile(bytes, name) {
+	if (!hasPlus()) return { ok: false, error: '当前平台不支持保存照片' }
+	const absDir = absPathOf('_doc/food/')
+	if (!absDir) return { ok: false, error: '拿不到照片目录路径' }
+	const dir = ensureDir(absDir)
+	if (!dir.ok) return dir
+	const res = await writeFileBytes(absPathOf(`_doc/food/${name}`), [bytes])
+	if (!res.ok) return res
+	return { ok: true, path: `_doc/food/${name}` }
 }
 
 /** 删掉私有目录里的文件（清理临时 zip） */

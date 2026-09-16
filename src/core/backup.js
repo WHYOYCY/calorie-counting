@@ -7,7 +7,12 @@ import { todayKey } from './date.js'
 import { hasStorage, readRaw, writeRaw, removeRaw } from './storage.js'
 import { toBase64 } from './photo.js'
 import { base64ToBytes } from './zip.js'
-import { writePrivateFile, removePrivateFile, copyPrivateToDownloads, pickFileBytes } from './native-fs.js'
+import {
+	writePrivateFile,
+	removePrivateFile,
+	copyPrivateToDownloads,
+	pickFileBytes,
+} from './native-fs.js'
 
 export function backupFileName() {
 	return `calorie-backup-${todayKey()}.json`
@@ -371,48 +376,7 @@ function privateFileSize(path) {
 	})
 }
 
-/** 把照片字节写进 App 私有目录（恢复备份时用） */
-export function writePhotoFile(bytes, name) {
-	if (typeof plus === 'undefined' || !plus || !plus.io || !plus.io.requestFileSystem) {
-		return Promise.resolve({ ok: false, error: '当前平台不支持保存照片' })
-	}
-	return new Promise((resolve) => {
-		try {
-			plus.io.requestFileSystem(
-				plus.io.PRIVATE_DOC,
-				(fs) => {
-					fs.root.getDirectory(
-						'food',
-						{ create: true },
-						(dir) => {
-							dir.getFile(
-								name,
-								{ create: true },
-								(entry) => {
-									entry.createWriter(
-										(w) => {
-											w.onwrite = () =>
-												resolve({ ok: true, path: `_doc/food/${name}` })
-											w.onerror = () => resolve({ ok: false, error: '写入照片失败' })
-											try {
-												w.write(new Blob([bytes], { type: 'image/jpeg' }))
-											} catch (e) {
-												resolve({ ok: false, error: 'write 异常' })
-											}
-										},
-										() => resolve({ ok: false, error: '无法创建写入器' })
-									)
-								},
-								() => resolve({ ok: false, error: '无法创建照片文件' })
-							)
-						},
-						() => resolve({ ok: false, error: '无法创建照片目录' })
-					)
-				},
-				() => resolve({ ok: false, error: '无法访问应用目录' })
-			)
-		} catch (e) {
-			resolve({ ok: false, error: String((e && e.message) || e) })
-		}
-	})
-}
+/** 把照片字节写进 App 私有目录（恢复备份时用）
+ *  —— 实现挪到 native-fs.js，二进制写入逻辑集中在一处
+ */
+export { writePhotoFile } from './native-fs.js'
