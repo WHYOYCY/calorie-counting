@@ -185,14 +185,37 @@ async function* chunkBytes(chunks, size) {
 }
 
 /**
+ * 往 Java OutputStream 写字节的两种「调用方式」。
+ *
+ * plus.android.invoke 是显式反射 —— 当初用它修好了
+ * 「resolver.insert is not a function」（返回自 Java 的实例方法没挂在代理上）。
+ * 但它对**参数**的编组在某些基座上可能不可靠，而
+ * 「importClass 之后直接点调用」才是官方文档的写法。
+ *
+ * 真机上到底哪种能把字节真正写进去，只能试 —— 所以两种都试。
+ */
+const CALL_MODES = ['direct', 'invoke']
+
+/** 按指定方式调用 Java 方法 */
+function callWith(mode, obj, name) {
+	const args = Array.prototype.slice.call(arguments, 3)
+	if (mode === 'invoke' && plus.android && typeof plus.android.invoke === 'function') {
+		return plus.android.invoke.apply(plus.android, [obj, name].concat(args))
+	}
+	// direct：直接点调用（要求已 importClass 过该类）
+	const fn = obj && obj[name]
+	if (typeof fn !== 'function') throw new Error(`调不到 ${name}（方法未暴露给 JS）`)
+	return fn.apply(obj, args)
+}
+
+/**
  * 把字节块写进 Java OutputStream。
  *
  * 用 OutputStreamWriter + ISO-8859-1：只往 Java 传**字符串**
- * （Java 侧自己编码成字节），因为 byte[] 过桥不可靠。
- * ISO-8859-1 是 U+0000~U+00FF 与字节一一映射，所以字符串里每个码点
- * 恰好写成一个字节，二进制无损。
+ * （Java 侧自己编码成字节），因为 byte[] 过桥已知不可靠。
+ * ISO-8859-1 是 U+0000~U+00FF 与字节一一映射，二进制无损。
  */
-async function writeViaWriter(os, chunks, trace, chunkSize) {
+async function writeViaWriter(os, chunks, trace, chunkSize, mode) {
 	const OutputStreamWriter = plus.android.importClass('java.io.OutputStreamWriter')
 	if (!OutputStreamWriter) throw new Error('importClass 返回空（java.io）')
 	const w = new OutputStreamWriter(os, 'ISO-8859-1')
@@ -201,22 +224,75 @@ async function writeViaWriter(os, chunks, trace, chunkSize) {
 		trace.push('encode')
 		const text = bytesToLatin1(piece)
 		trace.push('write')
-		callJava(w, 'write', text)
+		callWith(mode, w, 'write', text)
 		total += piece.length
 	}
 	trace.push('flush')
-	callJava(w, 'flush')
-	callJava(w, 'close')
+	callWith(mode, w, 'flush')
+	callWith(mode, w, 'close')
 	return total
+}
+
+/**
+ * 核对写进去的字节数，多路交叉验证。
+ *
+ * 为什么不只看 MediaColumns.SIZE：真机上三种块大小都报「实际只有 0 字节」，
+ * 有可能是 SIZE 列还没更新，而**文件其实是好的** —— 那就变成我的核对
+ * 把好文件误判成坏文件再删掉。
+ *
+ * 所以三条路都走：
+ *   1. query MediaColumns.SIZE   （便宜）
+ *   2. openInputStream + available  （便宜，直接问流）
+ *   3. readAllBytes 的长度          （贵，但权威）
+ * 任何一条等于期望值就算通过。
+ *
+ * @returns {number} 测到的字节数；都测不出来返回 -1（表示「无法核对」）
+ */
+function measureWritten(resolver, uri, expected) {
+	const sizes = []
+
+	// 1. MediaStore 的 SIZE 列
+	const byQuery = querySize(resolver, uri)
+	if (byQuery >= 0) sizes.push(byQuery)
+
+	// 2/3. 直接把流打开量一遍
+	try {
+		plus.android.importClass('java.io.InputStream')
+		const input = callJava(resolver, 'openInputStream', uri)
+		if (input) {
+			try {
+				const avail = Number(callJava(input, 'available'))
+				if (isFinite(avail) && avail >= 0) sizes.push(avail)
+			} catch (e) {
+				/* 问不到就算了 */
+			}
+			// 只要还没对上期望值，就用最权威的方式再量一次
+			if (sizes.indexOf(expected) < 0) {
+				try {
+					const bytes = callJava(input, 'readAllBytes')
+					if (bytes) sizes.push(Number(bytes.length) || 0)
+				} catch (e) {
+					/* 读不了就算了 */
+				}
+			}
+			callJava(input, 'close')
+		}
+	} catch (e) {
+		/* 开不了流就算了 */
+	}
+
+	if (!sizes.length) return -1
+	// 任何一条等于期望值就算通过 —— 宁可相信「量到了正确大小」的那一条
+	if (sizes.indexOf(expected) >= 0) return expected
+	return Math.max.apply(null, sizes)
 }
 
 /**
  * 往公共「下载」目录写一个文件（zip 与 JSON 共用这一条）。
  *
- * 块大小从大到小试，每种写完都回查 MediaStore 里的实际大小：
- * Native.js 单次传参有长度限制（社区实测约 4KB 以上就可能失败），
- * 而真机上的表现是**不报错但一个字节都没写进去** ——
- * 所以「换更小的块 + 写完核对」不是可选项，是必需的。
+ * 组合着试：两种调用方式 × 三种块大小，每种写完都核对实际字节数。
+ * Native.js 的写入在真机上有「不报错但没写进去」的历史，
+ * 所以「多组合 + 写完核对」不是可选项，是必需的。
  */
 async function writeBytesToMediaStore(chunks, filename, mime) {
 	if (!isAndroid()) {
@@ -228,65 +304,84 @@ async function writeBytesToMediaStore(chunks, filename, mime) {
 
 	plus.android.importClass('android.content.ContentResolver')
 	plus.android.importClass('java.io.OutputStream')
+	plus.android.importClass('java.io.InputStream')
 	const Downloads = plus.android.importClass('android.provider.MediaStore$Downloads')
 	const ContentValues = plus.android.importClass('android.content.ContentValues')
 	if (!Downloads || !ContentValues) {
 		return { ok: false, error: 'importClass 返回空（该基座可能没链入 MediaStore）', trace: '' }
 	}
 
-	// 目标目录：图片进 Pictures，其余进 Download
+	// 图片进 Pictures，其余进 Download
 	const sub = mime && mime.indexOf('image/') === 0 ? 'Pictures' : 'Download'
 	const errors = []
 
-	for (const size of WRITE_CHUNK_SIZES) {
-		const tr = ['chunk=' + size]
-		let resolver = null
-		let uri = null
-		try {
-			tr.push('new ContentValues')
-			const values = new ContentValues()
-			callJava(values, 'put', staticField(Downloads, 'DISPLAY_NAME'), filename)
-			callJava(values, 'put', staticField(Downloads, 'MIME_TYPE'), mime)
-			callJava(values, 'put', staticField(Downloads, 'RELATIVE_PATH'), sub)
-
-			tr.push('getContentResolver')
-			const main = plus.android.runtimeMainActivity()
-			resolver = callJava(main, 'getContentResolver')
-			if (!resolver) throw new Error('getContentResolver 返回空')
-
-			tr.push('insert')
-			uri = callJava(resolver, 'insert', staticField(Downloads, 'EXTERNAL_CONTENT_URI'), values)
-			if (!uri) throw new Error('系统拒绝创建文件（MediaStore 没返回 uri）')
-
-			tr.push('openOutputStream')
-			const os = callJava(resolver, 'openOutputStream', uri)
-			if (!os) throw new Error('无法打开输出流')
-
-			const total = await writeViaWriter(os, chunks, tr, size)
-			if (!total) throw new Error('一个字节都没写进去')
-
-			tr.push('verify')
-			const got = querySize(resolver, uri)
-			if (got >= 0 && got !== total) {
-				throw new Error(`写了 ${total} 字节，实际只有 ${got} 字节`)
-			}
-
-			tr.push('ok')
-			return {
-				ok: true,
-				where: `${sub}/${filename}`,
-				bytes: total,
-				chunkSize: size,
-				trace: tr.join(' → '),
-			}
-		} catch (e) {
-			// 这次块大小不行：删掉半成品，换更小的块重来
+	for (const mode of CALL_MODES) {
+		for (const size of WRITE_CHUNK_SIZES) {
+			const tag = `${mode}/${size}B`
+			const tr = [tag]
+			let resolver = null
+			let uri = null
+			let inconclusive = false
 			try {
-				if (uri && resolver) callJava(resolver, 'delete', uri, null, null)
-			} catch (e2) {
-				/* 清理失败就算了 */
+				tr.push('insert')
+				const values = new ContentValues()
+				callJava(values, 'put', staticField(Downloads, 'DISPLAY_NAME'), filename)
+				callJava(values, 'put', staticField(Downloads, 'MIME_TYPE'), mime)
+				callJava(values, 'put', staticField(Downloads, 'RELATIVE_PATH'), sub)
+
+				const main = plus.android.runtimeMainActivity()
+				resolver = callJava(main, 'getContentResolver')
+				if (!resolver) throw new Error('getContentResolver 返回空')
+
+				uri = callJava(
+					resolver,
+					'insert',
+					staticField(Downloads, 'EXTERNAL_CONTENT_URI'),
+					values
+				)
+				if (!uri) throw new Error('系统拒绝创建文件（MediaStore 没返回 uri）')
+
+				tr.push('openOutputStream')
+				const os = callJava(resolver, 'openOutputStream', uri)
+				if (!os) throw new Error('无法打开输出流')
+
+				const total = await writeViaWriter(os, chunks, tr, size, mode)
+				if (!total) throw new Error('一个字节都没写进去')
+
+				tr.push('verify')
+				const got = measureWritten(resolver, uri, total)
+				if (got === -1) {
+					// 三条路都量不出来：不敢说成功，但也不能把可能是好的文件删掉
+					inconclusive = true
+					throw new Error('无法核对写入结果（查不到大小）')
+				}
+				if (got !== total) {
+					throw new Error(`写了 ${total} 字节，实际只有 ${got} 字节`)
+				}
+
+				tr.push('ok')
+				return {
+					ok: true,
+					where: `${sub}/${filename}`,
+					bytes: total,
+					method: tag,
+					chunkSize: size,
+					trace: tr.join(' → '),
+				}
+			} catch (e) {
+				// 只有在「确定写了 0 字节 / 大小不对」时才删 —— 无法核对的场合保留文件，
+				// 让用户能自己去文件管理器看一眼，别把可能是好的文件删了
+				if (!inconclusive) {
+					try {
+						if (uri && resolver) callJava(resolver, 'delete', uri, null, null)
+					} catch (e2) {
+						/* 清理失败就算了 */
+					}
+				}
+				errors.push(`${tag}: ${String((e && e.message) || e)}${
+					inconclusive ? '（文件已保留，请到下载目录看一眼）' : ''
+				}`)
 			}
-			errors.push(`块 ${size}B: ${String((e && e.message) || e)}`)
 		}
 	}
 
@@ -322,33 +417,35 @@ export async function writeFileBytes(absPath, chunks) {
 	}
 
 	const errors = []
-	// 块大小从大到小试：写完用 File.length() 核对，对不上就换更小的块重来
-	for (const size of WRITE_CHUNK_SIZES) {
-		const sub = ['chunk=' + size]
-		let out = null
-		try {
-			out = new FileOutputStream(absPath)
-			const total = await writeViaWriter(out, chunks, sub, size)
-			out = null
+	for (const mode of CALL_MODES) {
+		for (const size of WRITE_CHUNK_SIZES) {
+			const tag = `${mode}/${size}B`
+			const sub = [tag]
+			let out = null
+			try {
+				out = new FileOutputStream(absPath)
+				const total = await writeViaWriter(out, chunks, sub, size, mode)
+				out = null
 
-			sub.push('verify')
-			let got = -1
-			try {
-				got = Number(callJava(new File(absPath), 'length'))
+				sub.push('verify')
+				let got = -1
+				try {
+					got = Number(callJava(new File(absPath), 'length'))
+				} catch (e) {
+					got = -1
+				}
+				if (isFinite(got) && got >= 0 && got !== total) {
+					throw new Error(`写了 ${total} 字节，文件实际只有 ${got} 字节`)
+				}
+				return { ok: true, bytes: total, method: tag, chunkSize: size, trace: sub.join(' → ') }
 			} catch (e) {
-				got = -1
+				try {
+					if (out) callJava(out, 'close')
+				} catch (e2) {
+					/* 关不上就算了 */
+				}
+				errors.push(`${tag}: ${String((e && e.message) || e)}`)
 			}
-			if (got >= 0 && got !== total) {
-				throw new Error(`写了 ${total} 字节，文件实际只有 ${got} 字节`)
-			}
-			return { ok: true, bytes: total, chunkSize: size, trace: sub.join(' → ') }
-		} catch (e) {
-			try {
-				if (out) callJava(out, 'close')
-			} catch (e2) {
-				/* 关不上就算了 */
-			}
-			errors.push(`块 ${size}B: ${String((e && e.message) || e)}`)
 		}
 	}
 	return { ok: false, error: errors.join('  ｜  '), trace: '' }

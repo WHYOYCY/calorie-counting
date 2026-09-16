@@ -984,7 +984,18 @@ function fakePlus(opts = {}) {
 				this.vals[k] = v
 			}
 		},
-		'java.io.OutputStreamWriter': function OutputStreamWriter() {
+		'java.io.OutputStreamWriter': function OutputStreamWriter(os, enc) {
+			if (opts.writerThrows) throw new Error('OutputStreamWriter 不可用')
+			return {
+				_kind: 'writer',
+				os,
+				enc,
+				write: (text) => impl.writer.write(text),
+				flush: () => {},
+				close: () => {},
+			}
+		},
+		'__unused_OutputStreamWriter': function OutputStreamWriter() {
 			return { _kind: 'writer' }
 		},
 		'java.lang.String': function JString() {
@@ -1744,7 +1755,7 @@ await withJavaFs({ writerThrows: true }, async () => {
 		`原因说清楚：${res.error}`
 	)
 	ok(
-		String(res.error).indexOf('块 2048B') >= 0 && String(res.error).indexOf('块 128B') >= 0,
+		String(res.error).indexOf('2048B') >= 0 && String(res.error).indexOf('128B') >= 0,
 		`★ 每种块大小都试过并各自报了原因：${res.error}`
 	)
 })
@@ -1916,10 +1927,18 @@ function fakeMediaStore(opts = {}) {
 			return { _kind: 'fos', path: p }
 		},
 		'java.io.OutputStreamWriter': function OutputStreamWriter(os, enc) {
-			// 这是「写法一」，也是预期在真机上能用的那种。
-			// writerThrows 用来验「写法一挂了能不能退到写法二」。
 			if (opts.writerThrows) throw new Error('OutputStreamWriter 不可用')
-			return { _kind: 'writer', os, enc }
+			// 忠实模拟 Native.js：**JS 里 new 出来的实例，方法可用**
+			// （Java 方法返回的实例才不可用 —— 那正是当初
+			//   「resolver.insert is not a function」的成因）
+			return {
+				_kind: 'writer',
+				os,
+				enc,
+				write: (text) => impl.writer.write({ os }, text),
+				flush: () => {},
+				close: () => {},
+			}
 		},
 		'java.io.File': function File(p) {
 			return { _kind: 'file', path: p }
@@ -1992,7 +2011,7 @@ await withMediaStore({ dropWrites: true }, async (env) => {
 		`★ 直接说出「写了多少、实际多少」：${res.error}`
 	)
 	ok(
-		String(res.error).indexOf('块 2048B') >= 0 && String(res.error).indexOf('块 128B') >= 0,
+		String(res.error).indexOf('2048B') >= 0 && String(res.error).indexOf('128B') >= 0,
 		`★ 每种块大小的失败原因都报出来（能看出块大小不是唯一原因）：${res.error}`
 	)
 	eq(env.docs.size, 0, '★ 失败时把那个空文件删掉了')
