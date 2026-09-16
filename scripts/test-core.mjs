@@ -670,6 +670,81 @@ eq(lastRequest.timeout, 20000, '测连通用更短的超时')
 const noKey = await testConnection({ apiKey: '', model: 'qwen3-vl-flash' })
 eq(noKey.ok, false, '空 Key 直接拒绝，不发请求')
 
+/* ========== 回归：手选餐次必须落盘 ========== */
+group('db.js · 手选餐次落盘（回归：改完餐次下次打开被打回）')
+
+freshStorage()
+initDB()
+
+// 20:00 按时间应归为晚餐，用户手动改成午餐
+const pinned = saveRecord({
+	ts: T(2026, 9, 13, 20, 0),
+	meal: 'lunch',
+	mealAuto: false,
+	items: [rice],
+})
+eq(pinned.meal, 'lunch', '保存返回值是手选值')
+eq(pinned.mealAuto, false, '★ mealAuto 落盘了（原先漏写，本次 bug 的根因）')
+
+// 模拟冷启动：丢缓存，从存储重读
+_resetCache()
+initDB()
+const reloaded = getRecord(pinned.id)
+eq(reloaded.meal, 'lunch', '★ 冷启动后仍是手选的午餐')
+eq(reloaded.mealAuto, false, '冷启动后标记仍是手动')
+
+// 自动归类的记录不受影响：改时间要跟着变
+const autoRec = saveRecord({ ts: T(2026, 9, 13, 8, 30), items: [rice] })
+eq(autoRec.mealAuto, true, '未指定餐次时 mealAuto 为 true')
+eq(autoRec.meal, 'breakfast', '按时间归为早餐')
+eq(
+	normalizeRecord({ ...autoRec, ts: T(2026, 9, 13, 19, 0) }).meal,
+	'dinner',
+	'自动归类的记录改了时间会重新归类'
+)
+
+// 手选的记录改了时间不重新归类
+const movedManual = normalizeRecord({ ...pinned, ts: T(2026, 9, 14, 8, 0) })
+eq(movedManual.meal, 'lunch', '手选的记录改了时间仍保持午餐')
+eq(movedManual.date, '2026-09-14', '但日期仍跟着 ts 走')
+
+group('db.js · 老数据没有 mealAuto 字段时的推断')
+
+const legacyManual = normalizeRecord({
+	ts: T(2026, 9, 13, 20, 0),
+	meal: 'lunch',
+	items: [rice],
+})
+eq(legacyManual.meal, 'lunch', '与自动值不一致 → 推断当初是手选，不被冲掉')
+eq(legacyManual.mealAuto, false, '补上 mealAuto:false')
+
+const legacyAuto = normalizeRecord({
+	ts: T(2026, 9, 13, 8, 30),
+	meal: 'breakfast',
+	items: [rice],
+})
+eq(legacyAuto.mealAuto, true, '与自动值一致 → 视为自动归类')
+eq(legacyAuto.meal, 'breakfast', '餐次保持早餐')
+
+const badMeal = normalizeRecord({ ts: T(2026, 9, 13, 8, 30), meal: 'brunch', items: [rice] })
+eq(badMeal.meal, 'breakfast', '非法餐次键回落到按时间推导')
+eq(badMeal.mealAuto, true, '非法餐次键不算手选')
+
+group('db.js · 重读不刷新时间戳')
+
+const stamped = normalizeRecord(
+	{ ts: T(2026, 9, 13, 8, 30), items: [rice], createdAt: 1000, updatedAt: 2000 },
+	{ keepStamps: true }
+)
+eq(stamped.createdAt, 1000, 'keepStamps 保留 createdAt')
+eq(stamped.updatedAt, 2000, 'keepStamps 保留 updatedAt')
+
+const stampBefore = getRecord(pinned.id).updatedAt
+_resetCache()
+initDB()
+eq(getRecord(pinned.id).updatedAt, stampBefore, '冷启动重读不改 updatedAt')
+eq(getRecord(pinned.id).createdAt, pinned.createdAt, '冷启动重读不改 createdAt')
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${pass} 项，失败 ${fail} 项`)

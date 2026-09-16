@@ -539,8 +539,10 @@ onLoad((q) => {
 		dateStr.value = sp.date
 		timeStr.value = sp.time
 		meal.value = r.meal
-		// 原本就是按时间自动归类的 → 继续跟随时间变化；手动指定过的 → 保留
-		mealAuto.value = r.meal === mealOfTs(r.ts)
+		// 原本就是按时间自动归类的 → 继续跟随时间变化；手动指定过的 → 保留。
+		// 直接读落盘的标记，不再拿「存的餐次是否等于按时间推导的值」反推：
+		// 手选了一个恰好等于自动值的餐次时，那种反推会误判成自动。
+		mealAuto.value = r.mealAuto !== false
 		items.value = (r.items || []).map(stateFromItem)
 		if (!items.value.length) items.value = [blankState()]
 		note.value = r.note || ''

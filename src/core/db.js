@@ -12,7 +12,7 @@
  *   2. 所有 uni API 调用都做运行时特性探测，使本模块可在 Node 中直接测试。
  *   3. date / meal 在保存时由 ts 重新派生，避免「改了时间但分类没变」。
  */
-import { SCHEMA_VERSION, DEFAULT_SETTINGS } from './constants.js'
+import { SCHEMA_VERSION, DEFAULT_SETTINGS, MEAL_KEYS } from './constants.js'
 import { dateKey, mealOfTs } from './date.js'
 import { round } from './nutrition.js'
 import { deletePhotoFile } from './photo.js'
@@ -91,24 +91,45 @@ export function normalizeItem(it) {
 
 /**
  * 归一化一条记录。
- * mealAuto !== false 时，餐次由 ts 重新推导（保证改时间后分类跟着变）；
- * 用户手动指定过餐次则传 mealAuto:false 保留其选择。
+ *
+ * mealAuto 表示「餐次是否跟随时间自动归类」：
+ *   true  -> meal 每次由 ts 重新推导（改了时间，分类跟着变）
+ *   false -> meal 用用户手选的值，不随时间变
+ *
+ * 这个标记必须写到返回值里（即落盘）。早先漏写了，导致存进去的记录
+ * 丢掉标记，下次冷启动重读时被视为「自动」而把手选餐次冲掉。
+ *
+ * opts.keepStamps：重读存量数据/导入备份时保留原有时间戳，
+ * 否则每次冷启动 updatedAt 都会被刷成当前时间。
  */
-export function normalizeRecord(input) {
+export function normalizeRecord(input, opts) {
 	const src = input || {}
 	const now = Date.now()
 	const ts = Number(src.ts) || now
+	const autoMeal = mealOfTs(ts)
+	const hasMeal = MEAL_KEYS.includes(src.meal)
+
+	// 老数据没有 mealAuto 字段：若存的餐次与按时间推导的不一致，
+	// 说明当初是手动指定的，按手动处理 —— 标记已经丢了，只能这样推断。
+	// 不这么干的话，这次修复反而会把用户以前手选的餐次冲回自动值。
+	const manual =
+		src.mealAuto === false ||
+		(src.mealAuto !== true && hasMeal && src.meal !== autoMeal)
+
+	const keepStamps = !!(opts && opts.keepStamps)
+
 	return {
 		id: src.id || genId(),
 		ts,
 		date: dateKey(ts),
-		meal: src.mealAuto === false ? src.meal || mealOfTs(ts) : mealOfTs(ts),
+		meal: manual && hasMeal ? src.meal : autoMeal,
+		mealAuto: !manual,
 		items: (src.items || []).map(normalizeItem).filter((it) => it.name && it.grams > 0),
 		photo: src.photo || '',
 		note: String(src.note || '').trim(),
 		source: src.source === 'ai' ? 'ai' : 'manual',
 		createdAt: Number(src.createdAt) || now,
-		updatedAt: now,
+		updatedAt: keepStamps ? Number(src.updatedAt) || Number(src.createdAt) || now : now,
 	}
 }
 
@@ -123,7 +144,9 @@ let recordCache = null
 function loadRecords() {
 	if (recordCache) return recordCache
 	const raw = readRaw(K_RECORDS, [])
-	recordCache = (Array.isArray(raw) ? raw : []).filter(isValidRecord).map(normalizeRecord)
+	recordCache = (Array.isArray(raw) ? raw : [])
+		.filter(isValidRecord)
+		.map((r) => normalizeRecord(r, { keepStamps: true }))
 	return recordCache
 }
 
@@ -254,7 +277,9 @@ export function importAll(payload, mode = 'merge') {
 	if (!data || !Array.isArray(data.records)) {
 		return { ok: false, error: '备份格式不正确：缺少 records 数组' }
 	}
-	const incoming = data.records.filter(isValidRecord).map(normalizeRecord)
+	const incoming = data.records
+		.filter(isValidRecord)
+		.map((r) => normalizeRecord(r, { keepStamps: true }))
 	if (mode === 'replace') {
 		for (const r of loadRecords()) removePhotoFile(r.photo)
 		recordCache = incoming
