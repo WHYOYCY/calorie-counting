@@ -113,6 +113,16 @@ export function saveToDownloads(text, filename) {
 }
 /* ---------------- 完整备份：读写文件 ---------------- */
 
+import { bytesToBase64 } from './zip.js'
+
+/** ISO-8859-1 字符串 → 字节（每个码点低 8 位就是一个字节） */
+function latin1ToBytes(text) {
+	const s = String(text)
+	const out = new Uint8Array(s.length)
+	for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff
+	return out
+}
+
 /** 文本 → UTF-8 字节（不依赖 TextEncoder：App 旧内核里不一定有） */
 function utf8Bytes(str) {
 	const t = String(str)
@@ -203,6 +213,13 @@ function copyFileToStream(absPath, os) {
  * 所以：只用字符串通道 + 分小块 + 写完核对实际大小。
  */
 export const WRITE_CHUNK_SIZES = [2048, 512, 128]
+
+/**
+ * 写私有文件时的块大小梯度。
+ * 只用字符串通道（RandomAccessFile.writeBytes），所以块可以更小；
+ * 真机上多大能过没有定论，同样从大到小试。
+ */
+export const FILE_CHUNK_SIZES = [4096, 1024, 256]
 
 async function* chunkBytes(chunks, size) {
 	for await (const c of chunks) {
@@ -443,47 +460,103 @@ export async function writeFileBytes(absPath, chunks) {
 	if (!isAndroid()) {
 		return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
 	}
-	const FileOutputStream = plus.android.importClass('java.io.FileOutputStream')
+	plus.android.importClass('java.io.RandomAccessFile')
+	const RAF = plus.android.importClass('java.io.RandomAccessFile')
 	const File = plus.android.importClass('java.io.File')
-	if (!FileOutputStream || !File) {
+	if (!RAF || !File) {
 		return { ok: false, error: 'importClass 返回空（基座可能没链入 java.io）', trace: '' }
 	}
 
 	const errors = []
-	for (const mode of CALL_MODES) {
-		for (const size of WRITE_CHUNK_SIZES) {
-			const tag = `${mode}/${size}B`
-			const sub = [tag]
-			let out = null
-			try {
-				out = new FileOutputStream(absPath)
-				const total = await writeViaWriter(out, chunks, sub, size, mode)
-				out = null
+	// 块大小从大到小试，写完用 File.length() 核对，对不上就换更小的块重来
+	for (const size of FILE_CHUNK_SIZES) {
+		const tr = ['chunk=' + size]
+		let raf = null
+		try {
+			tr.push('open')
+			raf = new RAF(absPath, 'rw')
+			// 'rw' 模式**不会清空已有文件**。不截断的话，新内容比旧的短时
+			// 尾部残留会污染数据 —— 而这条路上覆盖写是常态（重试、重导）。
+			callJava(raf, 'setLength', 0)
 
-				sub.push('verify')
-				let got = -1
-				try {
-					got = Number(callJava(new File(absPath), 'length'))
-				} catch (e) {
-					got = -1
-				}
-				if (isFinite(got) && got >= 0 && got !== total) {
-					throw new Error(`写了 ${total} 字节，文件实际只有 ${got} 字节`)
-				}
-				return { ok: true, bytes: total, method: tag, chunkSize: size, trace: sub.join(' → ') }
-			} catch (e) {
-				try {
-					if (out) callJava(out, 'close')
-				} catch (e2) {
-					/* 关不上就算了 */
-				}
-				errors.push(`${tag}: ${String((e && e.message) || e)}`)
+			let total = 0
+			// RandomAccessFile.writeBytes(String)：把字符串按**每个字符低 8 位**
+			// 写成字节 —— 正是二进制要的语义，而且参数是字符串，不过 byte[]。
+			for await (const piece of chunkBytes(chunks, size)) {
+				tr.push('write')
+				callJava(raf, 'writeBytes', bytesToLatin1(piece))
+				total += piece.length
 			}
+			callJava(raf, 'close')
+			raf = null
+
+			tr.push('verify')
+			let got = -1
+			try {
+				got = Number(callJava(new File(absPath), 'length'))
+			} catch (e) {
+				got = -1
+			}
+			if (isFinite(got) && got >= 0 && got !== total) {
+				throw new Error(`写了 ${total} 字节，文件实际只有 ${got} 字节`)
+			}
+
+			return { ok: true, bytes: total, method: 'writeBytes', chunkSize: size, trace: tr.join(' → ') }
+		} catch (e) {
+			try {
+				if (raf) callJava(raf, 'close')
+			} catch (e2) {
+				/* 关不上就算了 */
+			}
+			errors.push(`块 ${size}B: ${String((e && e.message) || e)}`)
 		}
 	}
 	return { ok: false, error: errors.join('  ｜  '), trace: '' }
 }
+/**
+ * 原生读一个文件成 base64 —— 只用字符串过桥。
+ *
+ * 为什么不用 plus.io：真机上 Java 写进去的文件，plus.io 读不出来
+ * （trace 走到 readViaPlus 就断了）。而这条路径全程：
+ *   Files.readString(path, ISO-8859-1) → Java String → JS 字符串
+ * 字符串是 Native.js 最可靠的编组类型。
+ * Files.readString 需要 API 33+（用户设备是 API 36）。
+ */
+export async function readFileBase64Native(absPath) {
+	const trace = []
+	if (!isAndroid()) {
+		return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
+	}
+	try {
+		trace.push('importClass')
+		const Files = plus.android.importClass('java.nio.file.Files')
+		const StandardCharsets = plus.android.importClass('java.nio.charset.StandardCharsets')
+		if (!Files || !StandardCharsets) {
+			throw new Error('importClass 返回空（需 API 33+ 的 java.nio.file）')
+		}
+		const cs = staticField(StandardCharsets, 'ISO_8859_1')
+		if (!cs) throw new Error('拿不到 ISO_8859_1 字符集')
 
+		trace.push('readString')
+		const text = callJava(Files, 'readString', pathOf(absPath), cs)
+		if (text === null || text === undefined) throw new Error('readString 返回空')
+
+		trace.push('decode')
+		const bytes = latin1ToBytes(String(text))
+		if (!bytes.length) {
+			return {
+				ok: false,
+				error: '读到的内容是空的（文件可能是 0 字节）',
+				trace: trace.join(' → '),
+			}
+		}
+
+		trace.push('ok')
+		return { ok: true, base64: bytesToBase64(bytes), bytes: bytes.length, trace: trace.join(' → ') }
+	} catch (e) {
+		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
+	}
+}
 /** 把照片字节写进私有目录（恢复备份时用） */
 export async function writePhotoFile(bytes, name) {
 	if (!hasPlus()) return { ok: false, error: '当前平台不支持保存照片' }
@@ -709,34 +782,34 @@ export async function readUriBase64(uri, opts = {}) {
 		// 关键改动：不在 JS 里接 byte[]（那样内容会丢），
 		// 而是让原生把流落成私有文件，再用 plus.io 读 ——
 		// 后者正是照片识别一直在用的读法，是验证过的。
-		if (!opts.onPickedFile) {
+		if (!opts.stagingPath) {
 			callJava(input, 'close')
-			return { ok: false, error: '内部错误：缺少落盘回调', trace: trace.join(' → ') }
+			return { ok: false, error: '内部错误：缺少落盘路径', trace: trace.join(' → ') }
 		}
-		const staged = opts.onPickedFile()
 		trace.push('nativeCopy')
-		copyStreamToFile(input, staged.absPath)
+		const staged = opts.stagingPath()
+		copyStreamToFile(input, staged)
 		callJava(input, 'close')
 
-		trace.push('readViaPlus')
-		const b64 = await staged.read()
-		if (!b64 || !b64.ok) {
-			return {
-				ok: false,
-				error: b64 && b64.error ? b64.error : '读取落盘后的文件失败',
-				trace: trace.join(' → '),
-			}
+		// 首选原生读（只用字符串过桥）
+		trace.push('readNative')
+		const native = await readFileBase64Native(staged)
+		if (native.ok) {
+			trace.push('ok')
+			return { ok: true, base64: native.base64, trace: trace.join(' → ') }
 		}
-		if (!b64.base64) {
-			return {
-				ok: false,
-				error: '读到的内容是空的（文件可能是 0 字节）',
-				trace: trace.join(' → '),
-			}
-		}
+		trace.push('readNative失败：' + native.error)
 
-		trace.push('ok')
-		return { ok: true, base64: b64.base64, trace: trace.join(' → ') }
+		// 备选：plus.io 读（对 plus.io 自己写的文件是可用的）
+		if (opts.readViaPlus) {
+			trace.push('readViaPlus')
+			const b64 = await opts.readViaPlus()
+			if (b64 && b64.ok && b64.base64) {
+				trace.push('ok')
+				return { ok: true, base64: b64.base64, trace: trace.join(' → ') }
+			}
+		}
+		return { ok: false, error: native.error, trace: trace.join(' → ') }
 	} catch (e) {
 		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
 	}
@@ -805,10 +878,11 @@ export function pickFileBytes(opts = {}) {
 					}
 					const uri = callJava(data, 'getData')
 					if (!uri) throw new Error('没有拿到文件 uri')
-					// 在原生侧落成私有文件，再由调用方用 plus.io 读
+					// 在原生侧落成私有文件，再原生读回
 					readUriBase64(uri, {
 						limit: opts.limit,
-						onPickedFile: opts.onPickedFile,
+						stagingPath: opts.stagingPath,
+						readViaPlus: opts.readViaPlus,
 					}).then((r) => {
 						if (r.ok) done({ ok: true, base64: r.base64 })
 						else done({ ok: false, error: r.error, inner: r.trace })

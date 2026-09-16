@@ -336,10 +336,11 @@ export async function pickZipFile() {
 
 	const picked = await pickFileBytes({
 		limit: FULL_BACKUP_MAX_BYTES,
-		onPickedFile: () => ({
-			absPath: absPathOf(localUrl),
-			read: () => toBase64(localUrl, null),
-		}),
+		// 原生侧落成私有文件，然后原生读回（只用字符串过桥）
+		stagingPath: () => absPathOf(localUrl),
+		// plus.io 读作为备选 —— 对 Java 写进去的文件它读不出来，
+		// 所以只是兜底，真正靠上面那条
+		readViaPlus: () => toBase64(localUrl, null),
 	})
 
 	// 不管成败都清掉临时文件

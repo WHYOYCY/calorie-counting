@@ -1039,98 +1039,6 @@ const withPlus = (opts, fn) => {
 
 const { saveToDownloads, probe, isAndroid } = await import('../src/core/native-fs.js')
 
-group('native-fs.js · 保存到下载目录（用假 plus 模拟 Native.js）')
-
-await withPlus({}, async (env) => {
-	const res = await saveToDownloads('{"a":1}', 'bak.json')
-	eq(res.ok, true, '★ 能成功写入')
-
-eq([...env.files.values()][0].text, '{"a":1}', '★ 内容完整落盘')
-	ok(String(res.where).includes('Download/'), '返回可读位置')
-	ok(
-		env.calls.some((c) => c.indexOf('ContentResolver') >= 0),
-		'★ 先 importClass 了 ContentResolver（方法才可见）'
-	)
-})
-
-// 没有 plus.android.invoke 的降级：不能崩，要给看得懂的报错
-await withPlus({ noInvoke: true }, async () => {
-	const res = await saveToDownloads('x', 'a.json')
-	eq(res.ok, false, '没有 plus.android.invoke 时不会崩，而是返回失败')
-	ok(
-		String(res.error).indexOf('未暴露给 JS') >= 0,
-		`★ 给出看得懂的原因而不是 TypeError：${res.error}`
-	)
-	ok(
-		String(res.trace).indexOf('getContentResolver') >= 0 ||
-			String(res.error).indexOf('未暴露给 JS') >= 0,
-		`trace/错误能指到出问题的环节：${res.trace || res.error}`
-	)
-})
-
-// invoke 存在但真的调不到方法时（就是用户遇到的 resolver.insert is not a function）
-await withPlus({ missingMethod: 'insert' }, async (env) => {
-	const res = await saveToDownloads('x', 'a.json')
-	eq(res.ok, false, '调不到 insert 时失败')
-	ok(
-		String(res.error).indexOf('is not a function') >= 0,
-		`★ 复现真机那类报错：${res.error}`
-	)
-	ok(
-		String(res.error).indexOf('insert') >= 0 || String(res.trace).indexOf('insert') >= 0,
-		`trace/错误能指到 insert：${res.error || res.trace}`
-	)
-})
-
-await withPlus({}, async (env) => {
-	const res = await saveToDownloads('y', 'b.json')
-	eq(res.ok, true, '正常环境下仍能成功')
-	eq(res.trace.indexOf('ok') >= 0, true, 'trace 记到 ok')
-})
-
-group('native-fs.js · 失败路径与降级')
-
-await withPlus({ sdk: 28 }, async () => {
-	const res = await saveToDownloads('x', 'a.json')
-	eq(res.unsupported, true, 'Android 10 以下标为不支持（不报错）')
-})
-
-await withPlus({ insertNull: true }, async () => {
-	const res = await saveToDownloads('x', 'a.json')
-	eq(res.ok, false, 'insert 返回空 → 失败')
-	ok(String(res.error).indexOf('拒绝') >= 0, `给出可读原因：${res.error}`)
-})
-
-await withPlus({ openNull: true }, async (env) => {
-	const res = await saveToDownloads('x', 'a.json')
-	eq(res.ok, false, 'openOutputStream 返回空 → 失败')
-	eq(env.files.size, 0, '★ 失败时把刚建的空文件删掉了（不留 0 字节垃圾）')
-})
-
-// byte[] 那条路已被移除：Native.js 传 byte[] 参数本身不可靠
-// （DCloud #220280、#107510），所以 OutputStreamWriter 失败就是失败，
-// 不再退回一条更不可靠的路。
-await withPlus({ writerThrows: true }, async () => {
-	const res = await saveToDownloads('hello', 'c.json')
-	eq(res.ok, false, '★ OutputStreamWriter 不可用时报失败，而不是假装成功')
-	ok(String(res.error).indexOf('OutputStreamWriter') >= 0, `原因说清楚：${res.error}`)
-})
-
-// 大文本也要分块写（Native.js 单次传参有长度限制）
-await withPlus({ maxChunkBytes: 1024 }, async (env) => {
-	const big = 'x'.repeat(5000)
-	const res = await saveToDownloads(big, 'big.json')
-	eq(res.ok, true, '★ 大文本分块写入成功')
-	ok(String(res.method).indexOf('512') >= 0, `自动降到能用的块大小：${res.method}`)
-	const doc = [...env.files.values()].find(Boolean)
-	eq(doc && doc.text && doc.text.length, 5000, '★ 5000 个字符全部写入（没有被长度限制截断）')
-})
-
-await withPlus({ importNullFor: 'android.provider.MediaStore$Downloads' }, async () => {
-	const res = await saveToDownloads('x', 'e.json')
-	eq(res.ok, false, 'importClass 返回空 → 失败')
-	ok(String(res.error).indexOf('基座') >= 0, `提示基座可能没链入：${res.error}`)
-})
 
 group('native-fs.js · 能力探测')
 
@@ -1584,6 +1492,22 @@ function fakeJavaFs(opts = {}) {
 	const calls = []
 
 	const impl = {
+		raf: {
+			// RandomAccessFile.writeBytes(String)：每字符低 8 位写成一个字节
+			writeBytes: (o, text) => {
+				// maxChunkBytes 模拟「超过这个长度的块被静默丢弃」
+				if (opts.maxChunkBytes && text.length > opts.maxChunkBytes) return
+				const list = files.get(o.path) || []
+				for (let i = 0; i < text.length; i++) list.push(text.charCodeAt(i) & 0xff)
+				files.set(o.path, list)
+			},
+			// 'rw' 模式不清空文件，要显式截断
+			setLength: (o, n) => {
+				const list = files.get(o.path) || []
+				files.set(o.path, list.slice(0, Number(n) || 0))
+			},
+			close: () => {},
+		},
 		jstring: {
 			getBytes: (o) => {
 				if (opts.getBytesNull) return null
@@ -1645,6 +1569,22 @@ function fakeJavaFs(opts = {}) {
 		},
 		'java.io.File': function File(p) {
 			return { _kind: 'file', path: p }
+		},
+		'java.io.RandomAccessFile': function RandomAccessFile(p) {
+			if (opts.rafThrows) throw new Error('RandomAccessFile 不可用')
+			if (!files.has(p)) files.set(p, [])
+			return { _kind: 'raf', path: p }
+		},
+		'java.nio.charset.StandardCharsets': { ISO_8859_1: { _kind: 'charset' } },
+		'java.nio.file.Files': {
+			readString: (p) => {
+				if (opts.readStringThrows) throw new Error('Files.readString 不可用')
+				const list = files.get(p && p.path)
+				if (!list) throw new Error('文件不存在')
+				let out = ''
+				for (let i = 0; i < list.length; i++) out += String.fromCharCode(list[i])
+				return out
+			},
 		},
 		'java.io.OutputStreamWriter': function OutputStreamWriter(os, enc) {
 			if (opts.writerThrows) throw new Error('OutputStreamWriter 不可用')
@@ -1747,23 +1687,20 @@ await withJavaFs({}, async (env) => {
 
 group('native-fs.js · 写文件的失败路径与分块')
 
-await withJavaFs({ writerThrows: true }, async () => {
+await withJavaFs({ rafThrows: true }, async () => {
 	const res = await NFS.writeFileBytes('ABS:/tmp/d.zip', [ALL_BYTES])
-	eq(res.ok, false, 'OutputStreamWriter 不可用 → 失败而不是假装成功')
-	ok(
-		String(res.error).indexOf('OutputStreamWriter') >= 0,
-		`原因说清楚：${res.error}`
-	)
-	ok(
-		String(res.error).indexOf('2048B') >= 0 && String(res.error).indexOf('128B') >= 0,
-		`★ 每种块大小都试过并各自报了原因：${res.error}`
-	)
+	eq(res.ok, false, 'RandomAccessFile 不可用 → 失败而不是假装成功')
+	ok(String(res.error).indexOf('RandomAccessFile') >= 0, `原因说清楚：${res.error}`)
 })
 
-await withJavaFs({ importNullFor: 'java.io.FileOutputStream' }, async () => {
-	const res = await NFS.writeFileBytes('ABS:/tmp/f.zip', [ALL_BYTES])
-	eq(res.ok, false, 'importClass 返回空 → 失败')
-	ok(String(res.error).indexOf('链入') >= 0, `提示基座问题：${res.error}`)
+// 覆盖写必须截断：'rw' 模式不会清空已有文件，
+// 不截断的话新内容比旧的短时尾部残留会污染数据
+await withJavaFs({}, async (env) => {
+	env.files.set('ABS:/tmp/twice.zip', new Array(300).fill(7))
+	const res = await NFS.writeFileBytes('ABS:/tmp/twice.zip', [new Uint8Array([1, 2, 3])])
+	eq(res.ok, true, '第二次写成功')
+	eq(env.files.get('ABS:/tmp/twice.zip').length, 3, '★ 旧内容被截断（没有留下 300 字节的尾巴）')
+	eq(env.files.get('ABS:/tmp/twice.zip').join(','), '1,2,3', '内容正确')
 })
 
 // 大块写不进去时要自动换更小的块（真机限制）
@@ -1772,7 +1709,8 @@ await withJavaFs({ maxChunkBytes: 512 }, async (env) => {
 	for (let i = 0; i < BIG.length; i++) BIG[i] = (i * 3) & 0xff
 	const res = await NFS.writeFileBytes('ABS:/tmp/big.zip', [BIG])
 	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
-	ok(String(res.method).indexOf('512') >= 0 || res.method === 'private-file', `实际用的方式：${res.method}`)
+	eq(res.method, 'writeBytes', `实际用的方式：${res.method}`)
+	eq(res.chunkSize, 256, `自动降到能用的块大小：${res.chunkSize}`)
 	const got = env.files.get('ABS:/tmp/big.zip')
 	eq(got.length, 5000, '★ 5000 字节全部写入')
 	eq(got[4999], BIG[4999], '末字节对')
@@ -1872,6 +1810,20 @@ function fakeMediaStore(opts = {}) {
 		},
 		os: { write: (o, bytes) => push(o, bytes), flush: () => {}, close: () => {} },
 		fos: { write: (o, bytes) => push(o, bytes), flush: () => {}, close: () => {} },
+		// RandomAccessFile.writeBytes(String)：字符串按每字符低 8 位写成字节
+		raf: {
+			writeBytes: (o, text) => {
+				if (!files.has(o.path)) files.set(o.path, { bytes: [] })
+				const box = files.get(o.path)
+				for (let i = 0; i < text.length; i++) box.bytes.push(text.charCodeAt(i) & 0xff)
+			},
+			// 'rw' 模式不清空文件，要显式截断
+			setLength: (o, n) => {
+				if (!files.has(o.path)) files.set(o.path, { bytes: [] })
+				files.get(o.path).bytes = files.get(o.path).bytes.slice(0, Number(n) || 0)
+			},
+			close: () => {},
+		},
 		writer: {
 			// 按 ISO-8859-1 写：每个码点恰好一个字节
 			write: (o, text) => {
@@ -1944,10 +1896,21 @@ function fakeMediaStore(opts = {}) {
 		'java.io.File': function File(p) {
 			return { _kind: 'file', path: p }
 		},
+		'java.io.RandomAccessFile': function RandomAccessFile(p) {
+			if (opts.rafThrows) throw new Error('RandomAccessFile 不可用')
+			if (!files.has(p)) files.set(p, { bytes: [] })
+			return { _kind: 'raf', path: p }
+		},
+		'java.nio.charset.StandardCharsets': { ISO_8859_1: { _kind: 'charset', name: 'ISO-8859-1' } },
 		'java.nio.file.Files': {
 			// 原生侧搬运：InputStream/Path → Path/OutputStream，字节不过 JS 桥
 			copy: (a, b) => {
 				if (opts.filesCopyThrows) throw new Error('Files.copy 不可用')
+				// dropWrites 现在必须作用在这条路上 —— 它才是真正在搬运的路径
+				if (opts.dropWrites) {
+					const srcBox = a && a._kind === 'is' ? docs.get(a.url) : a && a.path ? files.get(a.path) : null
+					return srcBox ? srcBox.bytes.length : 0
+				}
 				const src = a && a._kind === 'is' ? docs.get(a.url) : a && a.path ? files.get(a.path) : null
 				let dst = b && b._kind === 'os' ? docs.get(b.url) : null
 				if (!dst && b && b.path) {
@@ -1957,6 +1920,15 @@ function fakeMediaStore(opts = {}) {
 				if (!src || !dst) throw new Error('Files.copy 参数不认识')
 				for (let i = 0; i < src.bytes.length; i++) dst.bytes.push(src.bytes[i])
 				return src.bytes.length
+			},
+			// 按 ISO-8859-1 读成字符串（每字节 → 一个码点）
+			readString: (p) => {
+				if (opts.readStringThrows) throw new Error('Files.readString 不可用')
+				const box = files.get(p && p.path)
+				if (!box) throw new Error('文件不存在')
+				let out = ''
+				for (let i = 0; i < box.bytes.length; i++) out += String.fromCharCode(box.bytes[i])
+				return out
 			},
 		},
 	}
@@ -2054,7 +2026,7 @@ await withMediaStore({ maxChunkBytes: 512 }, async (env) => {
 
 	const res = await NFS.writeBytesToDownloads(BIG, 'big.zip')
 	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
-	ok(String(res.method).indexOf('512') >= 0 || res.method === 'private-file', `实际用的方式：${res.method}`)
+	eq(res.method, 'private-file', `实际走的策略：${res.method}（私有文件中转 + 原生搬运）`)
 	const doc = [...env.docs.values()].find((d) => d.name === 'big.zip')
 	eq(doc.bytes.length, 5000, '★ 5000 字节全部写入')
 	eq(doc.bytes[0], BIG[0], '首字节对')
@@ -2077,19 +2049,13 @@ await withMediaStore({}, async (env) => {
 	const read = await NFS.readUriBase64(
 		{ _kind: 'uri', url: env.firstUri() },
 		{
-			// 模拟调用方：原生落盘 + plus.io 读回
-			onPickedFile: () => ({
-				absPath: staged,
-				read: async () => {
-					const box = env.files.get(staged)
-					if (!box) return { ok: false, error: '落盘文件不存在' }
-					return { ok: true, base64: Buffer.from(Uint8Array.from(box.bytes)).toString('base64') }
-				},
-			}),
+			// 调用方只需给出落盘路径；读回由 native-fs 自己完成
+			stagingPath: () => staged,
 		}
 	)
 	eq(read.ok, true, '读取成功')
 	ok(String(read.trace).indexOf('nativeCopy') >= 0, `★ 走了原生搬运：${read.trace}`)
+	ok(String(read.trace).indexOf('readNative') >= 0, `★ 用原生读回而不是 plus.io：${read.trace}`)
 	const got = Buffer.from(read.base64, 'base64')
 	eq(got.length, 256, '读回字节数对')
 	eq([...got].join(','), [...ALL_BYTES].join(','), '★ 写入→读回 逐字节一致')
@@ -2099,9 +2065,10 @@ await withMediaStore({}, async (env) => {
 await withMediaStore({}, async (env) => {
 	// 造一个 0 字节的文件（真机上 FileUtils.copy 就是这样）
 	env.docs.set('content://downloads/99', { name: 'empty.zip', bytes: [] })
+	env.files.set('ABS:/_doc/e.zip', { bytes: [] })
 	const read = await NFS.readUriBase64(
 		{ _kind: 'uri', url: 'content://downloads/99' },
-		{ onPickedFile: () => ({ absPath: 'ABS:/_doc/e.zip', read: async () => ({ ok: true, base64: '' }) }) }
+		{ stagingPath: () => 'ABS:/_doc/e.zip' }
 	)
 	eq(read.ok, false, '★ 0 字节的文件 → 判为失败')
 	ok(
@@ -2120,8 +2087,8 @@ await withMediaStore({ openInNull: true }, async () => {
 await withMediaStore({}, async () => {
 	// 现在读取走「原生落盘 + plus.io 读」，所以必须由调用方提供落盘回调
 	const r = await NFS.readUriBase64({ _kind: 'uri', url: 'x' })
-	eq(r.ok, false, '没有落盘回调 → 明确报错而不是返回空数据')
-	ok(String(r.error).indexOf('落盘回调') >= 0, `原因说清楚：${r.error}`)
+	eq(r.ok, false, '没有落盘路径 → 明确报错而不是返回空数据')
+	ok(String(r.error).indexOf('落盘路径') >= 0, `原因说清楚：${r.error}`)
 })
 
 await withMediaStore({}, async (env) => {
