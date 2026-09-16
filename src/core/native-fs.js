@@ -218,3 +218,269 @@ export function saveToDownloads(text, filename) {
 		}
 	})
 }
+
+/* ---------------- 完整备份：写入 / 选择文件 ---------------- */
+
+/** 有 plus 环境（App），但不限平台 */
+export function hasPlus() {
+	return typeof plus !== 'undefined' && !!plus
+}
+
+/**
+ * 用 plus.io 把字节写进应用私有目录，返回 _doc 下的相对路径。
+ *
+ * 只能传 Blob：write() 若传字符串会把二进制弄坏。
+ * 先落私有目录而不是直接写公共目录，是因为 plus.io 能稳定写私有目录，
+ * 而公共目录必须走 MediaStore —— 那就得把二进制经过 JS 桥，很容易出错。
+ * 所以流程是：plus.io 写私有 → 原生 FileUtils.copy 到公共下载。
+ */
+export function writePrivateFile(bytes, filename) {
+	return new Promise((resolve) => {
+		if (!hasPlus() || !plus.io || !plus.io.requestFileSystem) {
+			resolve({ ok: false, unsupported: true, error: '当前平台不支持写文件' })
+			return
+		}
+		if (typeof Blob === 'undefined') {
+			resolve({ ok: false, error: '当前内核不支持 Blob，无法写二进制文件' })
+			return
+		}
+		try {
+			plus.io.requestFileSystem(
+				plus.io.PRIVATE_DOC,
+				(fs) => {
+					fs.root.getFile(
+						filename,
+						{ create: true },
+						(entry) => {
+							entry.createWriter(
+								(w) => {
+									w.onwrite = () =>
+										resolve({
+											ok: true,
+											path: entry.fullPath || `_doc/${filename}`,
+										})
+									w.onerror = () => resolve({ ok: false, error: '写入失败' })
+									try {
+										w.write(new Blob([bytes], { type: 'application/zip' }))
+									} catch (e) {
+										resolve({
+											ok: false,
+											error: 'write 调用异常：' + ((e && e.message) || e),
+										})
+									}
+								},
+								() => resolve({ ok: false, error: '无法创建写入器' })
+							)
+						},
+						() => resolve({ ok: false, error: '无法创建文件' })
+					)
+				},
+				() => resolve({ ok: false, error: '无法访问应用目录' })
+			)
+		} catch (e) {
+			resolve({ ok: false, error: String((e && e.message) || e) })
+		}
+	})
+}
+
+/** 删掉私有目录里的文件（清理临时 zip） */
+export function removePrivateFile(path) {
+	return new Promise((resolve) => {
+		if (!hasPlus() || !plus.io || !plus.io.resolveLocalFileSystemURL) {
+			resolve({ ok: false })
+			return
+		}
+		try {
+			plus.io.resolveLocalFileSystemURL(
+				path,
+				(entry) => entry.remove(() => resolve({ ok: true }), () => resolve({ ok: false })),
+				() => resolve({ ok: false })
+			)
+		} catch (e) {
+			resolve({ ok: false })
+		}
+	})
+}
+
+/**
+ * 把私有目录里的文件拷进公共「下载」目录。
+ *
+ * 关键：用原生 FileUtils.copy(InputStream, OutputStream) 直接对拷，
+ * **二进制根本不经过 JS 桥** —— 既避开了 Native.js 传 byte[] 的坑，
+ * 也不会把整个备份读进 JS 内存。FileUtils 是 API 29+ 的。
+ */
+export function copyPrivateToDownloads(privatePath, filename) {
+	return new Promise((resolve) => {
+		const trace = []
+		if (!isAndroid()) {
+			resolve({ ok: false, unsupported: true, error: '当前平台不是 Android' })
+			return
+		}
+		if (androidSdk() < 29) {
+			resolve({ ok: false, unsupported: true, error: 'Android 10 以下暂不支持' })
+			return
+		}
+
+		let resolver = null
+		let uri = null
+		try {
+			trace.push('importClass')
+			plus.android.importClass('android.content.ContentResolver')
+			plus.android.importClass('java.io.OutputStream')
+			plus.android.importClass('java.io.FileInputStream')
+			const Downloads = plus.android.importClass('android.provider.MediaStore$Downloads')
+			const ContentValues = plus.android.importClass('android.content.ContentValues')
+			const FileUtils = plus.android.importClass('android.os.FileUtils')
+			if (!Downloads || !ContentValues || !FileUtils) {
+				throw new Error('importClass 返回空（该基座可能没链入 MediaStore / FileUtils）')
+			}
+
+			trace.push('new ContentValues')
+			const values = new ContentValues()
+			callJava(values, 'put', staticField(Downloads, 'DISPLAY_NAME'), filename)
+			callJava(values, 'put', staticField(Downloads, 'MIME_TYPE'), 'application/zip')
+			callJava(values, 'put', staticField(Downloads, 'RELATIVE_PATH'), 'Download')
+
+			trace.push('getContentResolver')
+			const main = plus.android.runtimeMainActivity()
+			resolver = callJava(main, 'getContentResolver')
+			if (!resolver) throw new Error('getContentResolver 返回空')
+
+			trace.push('insert')
+			uri = callJava(
+				resolver,
+				'insert',
+				staticField(Downloads, 'EXTERNAL_CONTENT_URI'),
+				values
+			)
+			if (!uri) throw new Error('系统拒绝创建文件（MediaStore 没返回 uri）')
+
+			trace.push('convertPath')
+			const abs =
+				plus.io && typeof plus.io.convertLocalFileSystemURL === 'function'
+					? plus.io.convertLocalFileSystemURL(privatePath)
+					: ''
+			if (!abs) throw new Error('拿不到私有文件的绝对路径')
+
+			trace.push('openOutputStream')
+			const os = callJava(resolver, 'openOutputStream', uri)
+			if (!os) throw new Error('无法打开输出流')
+
+			trace.push('FileUtils.copy')
+			const FileInputStream = plus.android.importClass('java.io.FileInputStream')
+			const input = new FileInputStream(abs)
+			callJava(FileUtils, 'copy', input, os)
+			callJava(os, 'flush')
+			callJava(os, 'close')
+			callJava(input, 'close')
+
+			trace.push('ok')
+			resolve({ ok: true, where: `下载/${filename}`, trace: trace.join(' → ') })
+		} catch (e) {
+			try {
+				if (uri && resolver) callJava(resolver, 'delete', uri, null, null)
+			} catch (e2) {
+				/* 清理失败就算了 */
+			}
+			resolve({
+				ok: false,
+				error: String((e && e.message) || e),
+				trace: trace.join(' → '),
+			})
+		}
+	})
+}
+
+/**
+ * 让用户选一个文件（SAF，ACTION_OPEN_DOCUMENT），读成字节。
+ *
+ * ⚠️ 这条路最不确定：要重写 Activity.onActivityResult，
+ * 而社区多个反馈它「开界面时就被调用、真返回时反而不触发」。
+ * 所以这里：
+ *   1. 先把原回调存起来，用完还原（社区给出的规避办法）
+ *   2. 加超时，不然回调不触发会让界面一直卡着
+ *   3. 全程 trace，出错能定位到哪一步
+ */
+export function pickFileBytes(opts = {}) {
+	const TIMEOUT = Number(opts.timeout) || 90000
+	return new Promise((resolve) => {
+		const trace = []
+		const done = (() => {
+			let used = false
+			return (v) => {
+				if (used) return
+				used = true
+				clearTimeout(timer)
+				trace.push('result')
+				resolve({ ...v, trace: trace.join(' → ') })
+			}
+		})()
+		const timer = setTimeout(
+			() => done({ ok: false, error: '没有等到文件选择的结果（系统没回调）' }),
+			TIMEOUT
+		)
+
+		if (!isAndroid()) {
+			done({ ok: false, unsupported: true, error: '当前平台不是 Android' })
+			return
+		}
+
+		try {
+			trace.push('importClass')
+			plus.android.importClass('android.content.Intent')
+			plus.android.importClass('android.content.ContentResolver')
+			plus.android.importClass('java.io.InputStream')
+			plus.android.importClass('java.io.FileOutputStream')
+			const Intent = plus.android.importClass('android.content.Intent')
+			const FileUtils = plus.android.importClass('android.os.FileUtils')
+			if (!Intent || !FileUtils) throw new Error('importClass 返回空')
+
+			trace.push('buildIntent')
+			const main = plus.android.runtimeMainActivity()
+			const intent = new Intent(staticField(Intent, 'ACTION_OPEN_DOCUMENT'))
+			callJava(intent, 'addCategory', staticField(Intent, 'CATEGORY_OPENABLE'))
+			callJava(intent, 'setType', '*/*')
+
+			const CODE = 0x9f01
+			trace.push('hook onActivityResult')
+			const previous = main.onActivityResult
+			main.onActivityResult = function (reqCode, resCode, data) {
+				trace.push('called:' + reqCode)
+				if (reqCode !== CODE) {
+					if (previous) previous.apply(main, arguments)
+					return
+				}
+				// 用完还原，别把别人的回调顶掉
+				main.onActivityResult = previous
+				try {
+					if (resCode !== -1) {
+						done({ ok: false, cancelled: true, error: '' })
+						return
+					}
+					const uri = callJava(data, 'getData')
+					if (!uri) throw new Error('没有拿到文件 uri')
+					const resolver = callJava(main, 'getContentResolver')
+					const input = callJava(resolver, 'openInputStream', uri)
+					if (!input) throw new Error('无法打开输入流')
+
+					// 先落成私有临时文件，再用 plus.io 读（避免二进制过 JS 桥）
+					const tmpName = 'picked-' + Date.now() + '.zip'
+					const dest = plus.io.convertLocalFileSystemURL('_doc/' + tmpName)
+					const out = new FileOutputStream(dest)
+					callJava(FileUtils, 'copy', input, out)
+					callJava(out, 'flush')
+					callJava(out, 'close')
+					callJava(input, 'close')
+					done({ ok: true, path: '_doc/' + tmpName, bytes: 0, mode: 'file' })
+				} catch (e) {
+					done({ ok: false, error: String((e && e.message) || e) })
+				}
+			}
+
+			trace.push('startActivityForResult')
+			callJava(main, 'startActivityForResult', intent, CODE)
+		} catch (e) {
+			done({ ok: false, error: String((e && e.message) || e) })
+		}
+	})
+}

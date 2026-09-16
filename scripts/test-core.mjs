@@ -60,6 +60,10 @@ import {
 	chartData,
 } from '../src/core/stats.js'
 import { DEFAULT_DAILY_GOAL } from '../src/core/constants.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { crc32, zipChunks, readZip, base64ToBytes, bytesToBase64 } from '../src/core/zip.js'
 import {
 	saveSnapshot,
 	listSnapshots,
@@ -1110,6 +1114,427 @@ await withPlus({ sdk: 28 }, async () => {
 eq(isAndroid(), false, '没有 plus 时 isAndroid 为 false')
 
 eq((await saveToDownloads('x', 'y.json')).unsupported, true, '没有 plus 时直接标不支持')
+
+/* ========== zip 引擎 ========== */
+
+/** 把异步 chunk 迭代器收成一个 Uint8Array */
+async function collectZip(gen) {
+	const list = []
+	let len = 0
+	for await (const c of gen) {
+		list.push(c)
+		len += c.length
+	}
+	const out = new Uint8Array(len)
+	let at = 0
+	for (const c of list) {
+		out.set(c, at)
+		at += c.length
+	}
+	return out
+}
+
+const bytesOfText = (s) => new Uint8Array(Buffer.from(s, 'utf8'))
+
+// 包含全部 256 种字节值，能真正验出二进制是否被篡改
+const BINARY = new Uint8Array(1024)
+for (let i = 0; i < BINARY.length; i++) BINARY[i] = i & 0xff
+
+group('zip.js · CRC32')
+	eq(crc32(bytesOfText('123456789')), 0xcbf43926, 'CRC32 标准校验值（123456789 → CBF43926）')
+eq(crc32(new Uint8Array(0)), 0, '空数据 CRC 为 0')
+eq(crc32(bytesOfText('a')) === crc32(bytesOfText('b')), false, '不同内容 CRC 不同')
+
+group('zip.js · base64 互转')
+
+eq(bytesToBase64(new Uint8Array([0, 0, 0])), 'AAAA', '全 0 字节编码正确')
+eq([...base64ToBytes('AAAA')].join(','), '0,0,0', '解码回全 0')
+eq(
+	[...base64ToBytes(bytesToBase64(BINARY))].join(','),
+	[...BINARY].join(','),
+	'二进制 base64 往返无损（1024 字节全字节值）'
+)
+eq(bytesToBase64(new Uint8Array([255])), '/w==', '单字节补位正确')
+
+eq(base64ToBytes('').length, 0, '空字符串解码为空')
+
+group('zip.js · 写入与回读')
+
+const files = [
+	{ name: 'backup.json', data: bytesOfText('{"app":"calorie-counting"}') },
+	{ name: 'photos/food_1.jpg', data: BINARY },
+	{ name: 'photos/food_2.jpg', data: bytesOfText('tiny') },
+]
+const zipBytes = await collectZip(
+	zipChunks(
+		files.map((f) => ({ name: f.name, read: async () => f.data })),
+		{ now: T(2026, 9, 16, 12, 0) }
+	)
+)
+ok(zipBytes.length > 100, `生成了 ${zipBytes.length} 字节的 zip`)
+eq([zipBytes[0], zipBytes[1], zipBytes[2], zipBytes[3]].join(','), '80,75,3,4', '以 PK\x03\x04 开头')
+
+const back = readZip(zipBytes)
+eq(back.ok, true, '回读成功')
+eq(back.entries.length, 3, '条目数对')
+eq(back.entries.map((e) => e.name).join(','), 'backup.json,photos/food_1.jpg,photos/food_2.jpg', '条目名与顺序对')
+eq(
+	new TextDecoder().decode(back.entries[0].bytes),
+	'{"app":"calorie-counting"}',
+	'文本条目内容对'
+)
+eq(
+	[...back.entries[1].bytes].join(','),
+	[...BINARY].join(','),
+	'★ 二进制条目逐字节一致（没被编码弄坏）'
+)
+
+group('zip.js · 与真实解压工具的互操作性')
+
+const tmpDir = path.resolve('node_modules/.cache/ziptest')
+fs.rmSync(tmpDir, { recursive: true, force: true })
+fs.mkdirSync(tmpDir, { recursive: true })
+const zipPath = path.join(tmpDir, 'backup.zip')
+fs.writeFileSync(zipPath, Buffer.from(zipBytes))
+
+if (process.platform === 'win32') {
+	let okExpand = true
+	try {
+		execFileSync(
+			'powershell',
+			[
+				'-NoProfile',
+				'-NonInteractive',
+				'-Command',
+				`Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${path.join(tmpDir, 'out')}' -Force`,
+			],
+			{ stdio: 'ignore', timeout: 60000 }
+		)
+	} catch (e) {
+		okExpand = false
+	}
+	eq(okExpand, true, '★ PowerShell Expand-Archive 能解压本模块生成的 zip')
+	if (okExpand) {
+		const jsonOut = fs.readFileSync(path.join(tmpDir, 'out', 'backup.json'), 'utf8')
+		eq(jsonOut, '{"app":"calorie-counting"}', '★ 解压出来的 JSON 内容一致')
+		const binOut = fs.readFileSync(path.join(tmpDir, 'out', 'photos', 'food_1.jpg'))
+		eq(binOut.length, BINARY.length, '★ 解压出来的照片字节数一致')
+		eq(
+			binOut.equals(Buffer.from(BINARY)),
+			true,
+			'★ 解压出来的照片逐字节一致（真实的 zip 工具认这个格式）'
+		)
+	} else {
+		console.log('    （Expand-Archive 不可用，跳过互操作性验证）')
+	}
+} else {
+	console.log('    （非 Windows，跳过 Expand-Archive 互操作性验证）')
+}
+fs.rmSync(tmpDir, { recursive: true, force: true })
+
+group('zip.js · 坏文件要报得看得懂')
+
+eq(readZip(bytesOfText('这不是 zip')).error.indexOf('太小') >= 0, true, '太小 → 明确报错')
+eq(
+	readZip(new Uint8Array(100)).error.indexOf('找不到') >= 0,
+	true,
+	'没有结尾标记 → 明确报错'
+)
+
+eq(
+	readZip(zipBytes.subarray(0, zipBytes.length - 30)).ok,
+	false,
+	'被截断的 zip 不会被当成好的'
+)
+// 把压缩方式改成 8（deflate），应该明确报错而不是给出乱码
+const deflated = zipBytes.slice()
+for (let i = 0; i < deflated.length - 4; i++) {
+	if (deflated[i] === 0x50 && deflated[i + 1] === 0x4b && deflated[i + 2] === 0x01 && deflated[i + 3] === 0x02) {
+		deflated[i + 10] = 8 // 中央目录里的压缩方式改成 deflate
+		break
+	}
+}
+const dz = readZip(deflated)
+eq(dz.ok, false, 'deflate 条目 → 拒绝')
+ok(
+	String(dz.error).indexOf('重新打包') >= 0,
+	`★ 告诉用户「不要用别的工具重新打包」：${dz.error}`
+)
+
+/* ========== 完整备份（记录 + 照片） ========== */
+
+const FB = await import('../src/core/fullbackup.js')
+
+// 造一张假照片：字节内容可识别，方便验证有没有被弄坏
+const fakePhoto = (n) => {
+	const b = new Uint8Array(512)
+	for (let i = 0; i < b.length; i++) b[i] = (i * n) & 0xff
+	return b
+}
+
+const PHOTOS = {
+	'_doc/food/food_1.jpg': fakePhoto(1),
+	'/storage/emulated/0/Android/data/x/doc/food/food_2.jpg': fakePhoto(2),
+}
+
+const recWith = (id, photo, extra) => ({
+	id,
+	ts: T(2026, 9, 16, 12, 0),
+	date: '2026-09-16',
+	meal: 'lunch',
+	mealAuto: true,
+	items: [{ name: '米饭', grams: 200, per100: { kcal: 116, protein: 2.6, fat: 0.3, carbs: 25.9 } }],
+	photo,
+	note: '',
+	source: 'ai',
+	createdAt: T(2026, 9, 16, 12, 0),
+	updatedAt: T(2026, 9, 16, 12, 0),
+	...(extra || {}),
+})
+
+const fullPayloadOf = (records) => ({
+	app: 'calorie-counting',
+	schemaVersion: 1,
+	exportedAt: T(2026, 9, 16, 18, 0),
+	settings: { dailyGoal: 1800 },
+	records,
+})
+
+/** 从记录集打出完整备份 zip */
+async function buildZip(payload, photoMap, stats) {
+	const { entries, stats: s } = FB.fullBackupEntries(
+		payload,
+		async (p) => (photoMap && photoMap[p] ? photoMap[p] : null),
+		stats
+	)
+	const zip = await collectZip(zipChunks(entries, { now: T(2026, 9, 16, 18, 0) }))
+	return { zip, stats: s }
+}
+
+group('fullbackup.js · 路径处理')
+
+eq(FB.basename('_doc/food/a.jpg'), 'a.jpg', '本地 URL 取文件名')
+eq(FB.basename('/storage/emulated/0/x/food/b.jpg'), 'b.jpg', '原生绝对路径取文件名')
+eq(FB.basename('c.jpg'), 'c.jpg', '无目录时原样返回')
+eq(FB.basename(''), '', '空值不报错')
+eq(
+	FB.photoPathsOf([recWith('a', '_doc/food/x.jpg'), recWith('b', '_doc/food/x.jpg'), recWith('c', '')])
+		.length,
+	1,
+	'照片路径去重'
+)
+
+group('fullbackup.js · 导出：路径改写与缺失处理')
+
+const payload1 = fullPayloadOf([
+	recWith('r1', '_doc/food/food_1.jpg'),
+	recWith('r2', '/storage/emulated/0/Android/data/x/doc/food/food_2.jpg'),
+	recWith('r3', ''),
+])
+const out1 = await buildZip(payload1, PHOTOS)
+
+eq(out1.stats.photos, 2, '打包进 2 张照片')
+eq(out1.stats.missing.length, 0, '没有缺失')
+eq(out1.stats.planned, 2, '规划了 2 张')
+
+const rz1 = readZip(out1.zip)
+eq(rz1.ok, true, '生成的 zip 可读')
+eq(
+	rz1.entries.map((e) => e.name).join(','),
+	'backup.json,photos/food_1.jpg,photos/food_2.jpg',
+	'zip 结构正确'
+)
+const man1 = JSON.parse(new TextDecoder().decode(rz1.entries[0].bytes))
+eq(
+	man1.records.map((r) => r.photo).join('|'),
+	'photos/food_1.jpg|photos/food_2.jpg|',
+	'★ 导出的 JSON 里照片路径已改成 zip 内相对路径（这样才可移植）'
+)
+eq(man1.records[1].items[0].name, '米饭', '记录内容原封不动')
+eq(man1.settings.dailyGoal, 1800, '设置一起带走')
+
+// 照片文件已经丢了的情况
+const out2 = await buildZip(
+	fullPayloadOf([recWith('r1', '_doc/food/food_1.jpg'), recWith('r2', '_doc/food/food_gone.jpg')]),
+	PHOTOS
+)
+eq(out2.stats.photos, 1, '只打进存在的那张')
+eq(out2.stats.missing.join(','), 'food_gone.jpg', '★ 缺失的照片被记下来')
+eq(
+	readZip(out2.zip).entries.length,
+	2,
+	'★ 缺失的照片不会在 zip 里留个空文件'
+)
+
+group('fullbackup.js · 导入：路径映射与死链清理')
+
+const back1 = FB.parseFullBackup(out1.zip, (n) => `_doc/food/${n}`)
+eq(back1.ok, true, '解析成功')
+eq(back1.payload.records.length, 3, '记录数对')
+eq(
+	back1.payload.records.map((r) => r.photo).join('|'),
+	'_doc/food/food_1.jpg|_doc/food/food_2.jpg|',
+	'★ 照片路径映射到目标平台路径'
+)
+eq(back1.photos.length, 2, '带出 2 张照片')
+eq(
+	[...back1.photos[0].bytes].join(','),
+	[...PHOTOS['_doc/food/food_1.jpg']].join(','),
+	'★ 照片字节逐字节一致'
+)
+eq(back1.photos[0].path, '_doc/food/food_1.jpg', '照片有目标写入路径')
+
+// 记录里有路径但 zip 里没带照片 → 必须清空，不能留死链
+const noPhotoZip = await buildZip(payload1, {})
+const back2 = FB.parseFullBackup(noPhotoZip.zip, (n) => `_doc/food/${n}`)
+eq(
+	back2.payload.records.map((r) => r.photo).join('|'),
+	'||',
+	'★ 备份里没带照片时清空路径（否则换机会留一堆永远显示不出来的死链）'
+)
+eq(back2.photos.length, 0, '没有照片要写')
+
+eq(back2.payload.records[0].items[0].name, '米饭', '记录本身仍然完好')
+
+group('fullbackup.js · 摘要与坏文件')
+
+const fbSum = FB.summarizeFullBackup(out1.zip)
+eq(fbSum.ok, true, '能读摘要')
+eq(fbSum.records, 3, '摘要里的记录数')
+eq(fbSum.photos, 2, '摘要里的照片数')
+eq(fbSum.exportedAt, T(2026, 9, 16, 18, 0), '摘要里的导出时间')
+
+eq(FB.summarizeFullBackup(bytesOfText('nope')).ok, false, '不是 zip → 报错')
+
+eq(FB.parseFullBackup(bytesOfText('nope'), () => '').ok, false, '不是 zip → 解析失败')
+
+eq(
+	FB.parseFullBackup(out1.zip, () => '').records,
+	undefined,
+	'失败时不返回半成品 payload'
+)
+
+// 只有 backup.json、没有照片目录的 zip（没有照片的备份）也要能用
+const manifestOnly = await collectZip(
+	zipChunks([{ name: 'backup.json', read: async () => bytesOfText(JSON.stringify(fullPayloadOf([recWith('r1', '')]))) }], { now: 0 })
+)
+const back3 = FB.parseFullBackup(manifestOnly, (n) => n)
+eq(back3.ok, true, '没有照片目录的备份也能解析')
+eq(back3.photos.length, 0, '没有照片')
+eq(back3.payload.records.length, 1, '记录仍在')
+
+/* ========== 完整备份的编排（导出/恢复） ========== */
+
+const FBIO = await import('../src/core/fullbackup-io.js')
+
+group('fullbackup-io.js · 导出整体流程')
+
+freshStorage()
+initDB()
+// Node 里没有 plus，照片文件读不到 —— 正好验「缺失」这条路
+saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/food_a.jpg' })
+saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice] })
+
+eq(allRecords().length, 2, '先有 2 条记录')
+
+const built = await FBIO.buildFullBackupZip()
+eq(built.ok, true, '能打出完整备份')
+ok(built.bytes.length > 100, `产出 ${built.bytes.length} 字节`)
+eq(
+	readZip(built.bytes).entries.map((e) => e.name).join(','),
+	'backup.json',
+	'Node 下照片读不到，所以 zip 里只有清单（不会塞空文件）'
+)
+eq(built.stats.planned, 1, '规划了 1 张照片')
+eq(built.stats.missing.join(','), 'food_a.jpg', '★ 记录在案的缺失照片')
+eq(built.stats.photos, 0, '实际打进 0 张')
+
+const limited = await FBIO.buildFullBackupZip({ limit: 50 })
+eq(limited.ok, false, '★ 超过体积上限时明确拒绝')
+ok(String(limited.error).indexOf('清理') >= 0, `告诉用户怎么办：${limited.error}`)
+
+group('fullbackup-io.js · 恢复整体流程')
+
+// 造一个带照片的完整备份
+const srcPayload = fullPayloadOf([
+	recWith('r1', '_doc/food/food_1.jpg'),
+	recWith('r2', '/storage/emulated/0/Android/data/x/doc/food/food_2.jpg'),
+	recWith('r3', ''),
+])
+const packOk = await buildZip(srcPayload, PHOTOS)
+
+eq(packOk.stats.photos, 2, '备份里有 2 张照片')
+
+freshStorage()
+initDB()
+saveRecord({ ts: T(2026, 9, 16, 20, 0), items: [rice], note: '恢复前的旧记录' })
+const writtenFiles = []
+
+const rest = await FBIO.restoreFullBackup(packOk.zip, {
+	targetPathOf: (n) => `_doc/food/${n}`,
+	writePhoto: async (p) => {
+		writtenFiles.push({ name: p.name, size: p.bytes.length })
+		return { ok: true, path: p.path }
+	},
+})
+eq(rest.ok, true, '恢复成功')
+eq(rest.records, 3, '恢复出 3 条记录')
+eq(rest.photos, 2, '写回 2 张照片')
+eq(rest.failed, 0, '没有写失败')
+eq(
+	writtenFiles.map((f) => f.name).join(','),
+	'food_1.jpg,food_2.jpg',
+	'写回的文件名对'
+)
+eq(writtenFiles[0].size, 512, '★ 写回的照片字节数对')
+eq(allRecords().length, 3, '旧记录被覆盖（不是追加）')
+eq(
+	allRecords().some((r) => r.note === '恢复前的旧记录'),
+	false,
+	'恢复前的数据确实被替换掉了'
+)
+eq(
+	allRecords()
+		.map((r) => r.photo)
+		.sort()
+		.join('|'),
+	'|_doc/food/food_1.jpg|_doc/food/food_2.jpg',
+	'★ 记录里的照片路径指向新位置（排序后空串在最前）'
+)
+eq(rest.summary.records, 3, '返回摘要里的记录数')
+eq(rest.summary.photos, 2, '返回摘要里的照片数')
+
+eq(latestSnapshot().payload.records.length, 1, '★ 恢复前自动存了快照（能再退回去）')
+
+group('fullbackup-io.js · 照片写不进去时要清掉死链')
+
+freshStorage()
+initDB()
+const rest2 = await FBIO.restoreFullBackup(packOk.zip, {
+	targetPathOf: (n) => `_doc/food/${n}`,
+	writePhoto: async () => ({ ok: false, error: '磁盘满了' }),
+})
+eq(rest2.ok, true, '照片写不进去，但记录仍然恢复')
+eq(rest2.photos, 0, '写回 0 张')
+eq(rest2.failed, 2, '两2 张都失败')
+eq(allRecords().length, 3, '记录数对')
+eq(
+	allRecords().filter((r) => r.photo).length,
+	0,
+	'★ 写不进去的照片把路径清空了（否则换机后全是显示不出来的死链）'
+)
+eq(
+	allRecords().filter((r) => r.items.length).length,
+	3,
+	'★ 记录本身完好无损'
+)
+
+eq((await FBIO.restoreFullBackup(bytesOfText('not a zip'), { writePhoto: async () => ({}) })).ok, false, '坏文件 → 恢复失败')
+
+eq(FBIO.humanSize(512), '512 B', '体积格式化：字节')
+eq(FBIO.humanSize(2048), '2.0 KB', '体积格式化：KB')
+eq(FBIO.humanSize(5 * 1024 * 1024), '5.0 MB', '体积格式化：MB')
+ok(FBIO.fullBackupFileName().indexOf('full.zip') > 0, `文件名带 full 后缀：${FBIO.fullBackupFileName()}`)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

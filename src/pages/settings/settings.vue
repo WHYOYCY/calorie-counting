@@ -140,6 +140,22 @@
 				<view class="btn btn-plain grow" @click="doExport">导出备份</view>
 				<view class="btn btn-plain grow" @click="openImport">导入备份</view>
 			</view>
+			<text class="hint t-xs t-mute">
+				只含记录与设置，体积很小。照片不在这里面。
+			</text>
+
+			<!-- 完整备份：把照片也装进去，换手机就靠它 -->
+			<view class="sub-head">
+				<text class="sub-title">完整备份（含照片）</text>
+			</view>
+			<text class="hint t-xs t-mute">
+				把设置、记录和所有照片打成一个 zip。换手机时在新手机上用「从文件恢复」导入它，
+				照片就一起过去了。不带照片的普通备份在新手机上会显示一片空白。
+			</text>
+			<view class="row-btns">
+				<view class="btn btn-ghost grow" @click="doFullBackup">导出完整备份</view>
+				<view class="btn btn-ghost grow" @click="doFullRestore">从文件恢复</view>
+			</view>
 
 			<!-- 本机自动备份：清空与覆盖导入都是不可逆的，得留后悔药 -->
 			<view class="sub-head between">
@@ -228,6 +244,16 @@ import {
 	SNAPSHOT_KEEP,
 } from '../../core/backup.js'
 import { probe, saveToDownloads } from '../../core/native-fs.js'
+import { writePhotoFile } from '../../core/backup.js'
+import { summarizeFullBackup } from '../../core/fullbackup.js'
+import {
+	buildFullBackupZip,
+	deliverFullBackup,
+	loadFullBackupFromPicker,
+	restoreFullBackup,
+	fullBackupFileName,
+	humanSize,
+} from '../../core/fullbackup-io.js'
 import { testConnection } from '../../core/ai.js'
 
 const showKey = ref(false)
@@ -549,6 +575,114 @@ function showExportError(title, error, json, trace) {
 		cancelText: '好',
 		success: (r) => {
 			if (r.confirm) exportViaClipboard(json, false)
+		},
+	})
+}
+
+/* ---------------- 完整备份（含照片） ---------------- */
+
+const fullBusy = ref(false)
+
+/** 导出完整备份：打包 → 交给用户 */
+async function doFullBackup() {
+	if (fullBusy.value) return
+	fullBusy.value = true
+	uni.showLoading({ title: '打包中…', mask: true })
+
+	const built = await buildFullBackupZip({
+		onProgress: (i, total) => {
+			uni.showLoading({ title: `打包 ${i}/${total}…`, mask: true })
+		},
+	})
+	if (!built.ok) {
+		uni.hideLoading()
+		fullBusy.value = false
+		uni.showModal({ title: '打包失败', content: built.error || '未知错误', showCancel: false })
+		return
+	}
+
+	uni.showLoading({ title: '保存中…', mask: true })
+	const res = await deliverFullBackup(built.bytes, fullBackupFileName())
+	uni.hideLoading()
+	fullBusy.value = false
+
+	const s = built.stats || { photos: 0, missing: [] }
+	const detail = [
+		`${humanSize(built.bytes.length)}，含 ${s.photos} 张照片`,
+		s.missing && s.missing.length ? `有 ${s.missing.length} 张照片文件已丢失，已跳过` : '',
+	].filter(Boolean)
+
+	if (res.ok) {
+		uni.showModal({
+			title: '完整备份已导出',
+			content: `${detail.join('\n')}\n\n位置：${res.where || '浏览器下载目录'}\n\n换手机时，把这个 zip 拷到新手机，在新手机上用「从文件恢复」。`,
+			showCancel: false,
+		})
+		return
+	}
+
+	if (res.unsupported) {
+		uni.showToast({ title: res.error || '当前平台不支持', icon: 'none' })
+		return
+	}
+
+	showExportError('保存完整备份失败', res.error, null, res.trace, detail.join('\n'))
+}
+
+/** 从文件恢复完整备份 */
+async function doFullRestore() {
+	if (fullBusy.value) return
+
+	// 先选文件，选完再确认 —— 确认框里能告诉用户这个文件里到底有什么
+	const picked = await loadFullBackupFromPicker()
+	if (!picked.ok) {
+		if (picked.cancelled) return
+		uni.showModal({
+			title: '没能读取所选文件',
+			content: `${picked.error || '未知错误'}${picked.trace ? `\n\n失败步骤：${picked.trace}` : ''}`,
+			showCancel: false,
+		})
+		return
+	}
+
+	const sum = summarizeFullBackup(picked.bytes)
+	if (!sum.ok) {
+		uni.showModal({ title: '这不是有效的完整备份', content: sum.error, showCancel: false })
+		return
+	}
+
+	uni.showModal({
+		title: '用这个备份覆盖当前数据？',
+		content: `备份里：${sum.records} 条记录，${sum.photos} 张照片。\n\n当前数据会先自动在本机存一份，可以再退回来。`,
+		confirmText: '恢复',
+		success: async (r) => {
+			if (!r.confirm) return
+			fullBusy.value = true
+			uni.showLoading({ title: '恢复中…', mask: true })
+
+			const res = await restoreFullBackup(picked.bytes, {
+				// App：照片写回私有目录，记录里的路径指向它
+				targetPathOf: (name) => `_doc/food/${name}`,
+				writePhoto: (p) => writePhotoFile(p.bytes, p.name),
+			})
+
+			uni.hideLoading()
+			fullBusy.value = false
+			refresh()
+
+			if (!res.ok) {
+				uni.showModal({ title: '恢复失败', content: res.error || '未知错误', showCancel: false })
+				return
+			}
+			const warn =
+				res.failed > 0
+					? `\n\n有 ${res.failed} 张照片没能写回（已把对应记录的图片清空，不会留下显示不出来的死链）`
+					: ''
+			uni.showModal({
+				title: '已恢复',
+				content: `${res.records} 条记录，${res.photos} 张照片。${warn}`,
+				showCancel: false,
+			})
 		},
 	})
 }

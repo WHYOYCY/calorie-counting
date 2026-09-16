@@ -5,6 +5,9 @@
  */
 import { todayKey } from './date.js'
 import { hasStorage, readRaw, writeRaw, removeRaw } from './storage.js'
+import { toBase64 } from './photo.js'
+import { base64ToBytes } from './zip.js'
+import { writePrivateFile, removePrivateFile, copyPrivateToDownloads, pickFileBytes } from './native-fs.js'
 
 export function backupFileName() {
 	return `calorie-backup-${todayKey()}.json`
@@ -229,3 +232,187 @@ export function writeBackupFile(json, filename = backupFileName()) {
 }
 
 /** 复制到剪贴板（各端通用兜底） - 已上移到剪贴板一节 */
+
+/* ---------------- 完整备份（含照片）的落盘与选取 ---------------- */
+
+/**
+ * 完整备份的内存上限。
+ * 备份会先在内存里组装成 Uint8Array（几百 MB 会把手机搞崩），
+ * 所以超过就明确拒绝，让用户先清理照片。
+ */
+export const FULL_BACKUP_MAX_BYTES = 120 * 1024 * 1024
+
+/** 把完整备份交给用户：H5 浏览器下载 / App 落私有目录再进公共下载目录 */
+export async function persistBackupZip(bytes, filename) {
+	const isH5 = typeof document !== 'undefined' && typeof Blob !== 'undefined'
+	const app = typeof plus !== 'undefined' && !!plus && plus.io && plus.io.requestFileSystem
+
+	// App：plus.io 写私有目录 → 原生 FileUtils.copy 进公共「下载」
+	if (app) {
+		const wrote = await writePrivateFile(bytes, filename)
+		if (!wrote.ok) {
+			return { ok: false, error: wrote.error || '写入临时文件失败', trace: '' }
+		}
+		const copied = await copyPrivateToDownloads(wrote.path, filename)
+		// 临时文件不管成不成功都删掉，别在私有目录里留一份几百 MB 的副本
+		removePrivateFile(wrote.path)
+		if (copied.ok) return { ok: true, mode: 'downloads', where: copied.where }
+		return {
+			ok: false,
+			mode: 'private',
+			error: copied.error,
+			trace: copied.trace,
+		}
+	}
+
+	// H5：浏览器下载
+	if (isH5) {
+		try {
+			const blob = new Blob([bytes], { type: 'application/zip' })
+			const url = URL.createObjectURL(blob)
+			const a = document.createElement('a')
+			a.href = url
+			a.download = filename
+			a.click()
+			setTimeout(() => URL.revokeObjectURL(url), 1000)
+			return { ok: true, mode: 'download' }
+		} catch (e) {
+			return { ok: false, error: '浏览器下载失败' }
+		}
+	}
+
+	return { ok: false, error: '当前环境不支持保存文件' }
+}
+
+/** H5：用 <input type=file> 选一个 zip 并读成字节 */
+function pickZipOnH5() {
+	return new Promise((resolve) => {
+		try {
+			const input = document.createElement('input')
+			input.type = 'file'
+			input.accept = '.zip,application/zip'
+			input.style.display = 'none'
+			input.onchange = () => {
+				const file = input.files && input.files[0]
+				if (!file) {
+					resolve({ ok: false, cancelled: true, error: '' })
+					return
+				}
+				if (file.size > FULL_BACKUP_MAX_BYTES) {
+					resolve({ ok: false, error: '这个备份文件太大了，当前版本不支持' })
+					return
+				}
+				const reader = new FileReader()
+				reader.onload = () => {
+					resolve({ ok: true, bytes: new Uint8Array(reader.result) })
+				}
+				reader.onerror = () => resolve({ ok: false, error: '读取文件失败' })
+				reader.readAsArrayBuffer(file)
+			}
+			document.body.appendChild(input)
+			input.click()
+			setTimeout(() => {
+				if (input.parentNode) input.parentNode.removeChild(input)
+			}, 60000)
+		} catch (e) {
+			resolve({ ok: false, error: '无法打开文件选择器' })
+		}
+	})
+}
+
+/**
+ * 让用户选一个完整备份文件并读成字节。
+ * H5 走 <input type=file>；App 走 SAF，先落私有临时文件再用 plus.io 读。
+ */
+export async function pickZipFile() {
+	const isH5 = typeof document !== 'undefined'
+
+	if (isH5) return pickZipOnH5()
+
+	const picked = await pickFileBytes()
+	if (!picked.ok) return picked
+
+	// 先看大小，太大就别读了（读进来会 base64 膨胀 33%）
+	const size = await privateFileSize(picked.path)
+	if (size > FULL_BACKUP_MAX_BYTES) {
+		removePrivateFile(picked.path)
+		return { ok: false, error: '这个备份文件太大了，当前版本不支持' }
+	}
+
+	const b64 = await toBase64(picked.path, null)
+	removePrivateFile(picked.path)
+	if (!b64.ok) {
+		return { ok: false, error: '读取所选文件失败', trace: picked.trace }
+	}
+	return { ok: true, bytes: base64ToBytes(b64.base64), trace: picked.trace }
+}
+
+/** 读私有文件的大小（读不到返回 0，交给后面的读取去报错） */
+function privateFileSize(path) {
+	return new Promise((resolve) => {
+		if (typeof plus === 'undefined' || !plus || !plus.io || !plus.io.resolveLocalFileSystemURL) {
+			resolve(0)
+			return
+		}
+		try {
+			plus.io.resolveLocalFileSystemURL(
+				path,
+				(entry) => {
+					entry.file(
+						(f) => resolve(Number(f && f.size) || 0),
+						() => resolve(0)
+					)
+				},
+				() => resolve(0)
+			)
+		} catch (e) {
+			resolve(0)
+		}
+	})
+}
+
+/** 把照片字节写进 App 私有目录（恢复备份时用） */
+export function writePhotoFile(bytes, name) {
+	if (typeof plus === 'undefined' || !plus || !plus.io || !plus.io.requestFileSystem) {
+		return Promise.resolve({ ok: false, error: '当前平台不支持保存照片' })
+	}
+	return new Promise((resolve) => {
+		try {
+			plus.io.requestFileSystem(
+				plus.io.PRIVATE_DOC,
+				(fs) => {
+					fs.root.getDirectory(
+						'food',
+						{ create: true },
+						(dir) => {
+							dir.getFile(
+								name,
+								{ create: true },
+								(entry) => {
+									entry.createWriter(
+										(w) => {
+											w.onwrite = () =>
+												resolve({ ok: true, path: `_doc/food/${name}` })
+											w.onerror = () => resolve({ ok: false, error: '写入照片失败' })
+											try {
+												w.write(new Blob([bytes], { type: 'image/jpeg' }))
+											} catch (e) {
+												resolve({ ok: false, error: 'write 异常' })
+											}
+										},
+										() => resolve({ ok: false, error: '无法创建写入器' })
+									)
+								},
+								() => resolve({ ok: false, error: '无法创建照片文件' })
+							)
+						},
+						() => resolve({ ok: false, error: '无法创建照片目录' })
+					)
+				},
+				() => resolve({ ok: false, error: '无法访问应用目录' })
+			)
+		} catch (e) {
+			resolve({ ok: false, error: String((e && e.message) || e) })
+		}
+	})
+}

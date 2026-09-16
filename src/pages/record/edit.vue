@@ -3,7 +3,20 @@
 		<!-- 照片：手动添加路径同样可以拍照留档或识别填充 -->
 		<view class="card photo-card">
 			<template v-if="photo">
-				<image class="photo" :src="photoView" mode="aspectFill" @click="previewPhoto" />
+				<image
+					v-if="!photoDead"
+					class="photo"
+					:src="photoView"
+					mode="aspectFill"
+					@click="previewPhoto"
+					@error="onPhotoError"
+				/>
+				<!-- 照片文件不在了（换手机、清理数据）时要说清楚，
+				     而不是只留一片空白让人以为是应用坏了 -->
+				<view v-else class="photo-missing">
+					<text class="photo-missing-t">照片已丢失</text>
+					<text class="photo-missing-s">换手机或清理数据后照片文件不在了，记录本身不受影响</text>
+				</view>
 				<text class="photo-tag" v-if="source === 'ai'">AI 识别</text>
 				<view class="photo-acts">
 					<view class="photo-act" @click="recognizeCurrentPhoto">识别填充</view>
@@ -196,7 +209,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
 import { MEALS } from '../../core/constants.js'
 import {
@@ -240,6 +253,17 @@ const photoTransient = ref(false)
  * 用 computed 避免每次重渲染都调一次原生转换。
  */
 const photoView = computed(() => photoSrc(photo.value))
+/** 照片文件已经读不出来了（换手机 / 清理数据后）—— 界面上要说清楚 */
+const photoDead = ref(false)
+
+// 换了照片就重置「丢失」状态
+watch(photo, () => {
+	photoDead.value = false
+})
+
+function onPhotoError() {
+	photoDead.value = true
+}
 const source = ref('manual')
 const createdAt = ref(0)
 const showMacros = ref(false)
@@ -663,6 +687,30 @@ function remove() {
 		width: 100%;
 		height: 400rpx;
 		display: block;
+	}
+
+	/* 照片丢失时的占位：把原因说清楚 */
+	.photo-missing {
+		height: 400rpx;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		background: $c-fill;
+		padding: 0 $s-5;
+	}
+
+	.photo-missing-t {
+		font-size: 26rpx;
+		color: $c-text-sub;
+	}
+
+	.photo-missing-s {
+		font-size: 21rpx;
+		color: $c-text-mute;
+		margin-top: $s-2;
+		text-align: center;
+		line-height: 1.5;
 	}
 
 	.photo-tag {
