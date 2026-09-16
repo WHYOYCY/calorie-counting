@@ -100,45 +100,6 @@ function staticField(cls, name) {
 	return null
 }
 
-/**
- * 把字符串写进输出流。
- *
- * 两条写法都试：
- *   A. OutputStreamWriter 可以直接吃 JS 字符串，最省事
- *   B. 退回 new java.lang.String(text).getBytes('UTF-8') + write(byte[])
- *      —— 注意必须 new 出真正的 String 实例：invoke 对原始 JS 字符串
- *         调 getBytes 会返回 null（社区已知问题）
- */
-function writeText(os, text, trace) {
-	const errs = []
-
-	try {
-		trace.push('writer')
-		const OutputStreamWriter = plus.android.importClass('java.io.OutputStreamWriter')
-		const w = new OutputStreamWriter(os, 'UTF-8')
-		callJava(w, 'write', text)
-		callJava(w, 'flush')
-		callJava(w, 'close')
-		return
-	} catch (e) {
-		errs.push('Writer: ' + ((e && e.message) || e))
-	}
-
-	try {
-		trace.push('getBytes')
-		const JString = plus.android.importClass('java.lang.String')
-		const bytes = callJava(new JString(text), 'getBytes', 'UTF-8')
-		if (!bytes) throw new Error('getBytes 返回空')
-		callJava(os, 'write', bytes)
-		callJava(os, 'flush')
-		callJava(os, 'close')
-		return
-	} catch (e) {
-		errs.push('getBytes: ' + ((e && e.message) || e))
-	}
-
-	throw new Error('写入内容失败（' + errs.join('；') + '）')
-}
 
 /**
  * 把文本写进公共「下载」目录。
@@ -146,80 +107,28 @@ function writeText(os, text, trace) {
  * @returns Promise<{ok:boolean, where?:string, error?:string, trace?:string}>
  */
 export function saveToDownloads(text, filename) {
-	return new Promise((resolve) => {
-		const trace = []
-
-		if (!isAndroid()) {
-			resolve({ ok: false, unsupported: true, error: '当前平台不是 Android' })
-			return
-		}
-		if (androidSdk() < 29) {
-			// Android 10 以下走传统路径，这里没有实现（且那些系统上
-			// 应用私有目录本来就是可访问的，现有导出方式够用）
-			resolve({ ok: false, unsupported: true, error: 'Android 10 以下暂不支持' })
-			return
-		}
-
-		let resolver = null
-		let uri = null
-
-		try {
-			// 关键：返回自 Java 的实例，先 importClass 其类，方法才可见
-			trace.push('importClass')
-			plus.android.importClass('android.content.Context')
-			plus.android.importClass('android.content.ContentResolver')
-			plus.android.importClass('java.io.OutputStream')
-			const Downloads = plus.android.importClass('android.provider.MediaStore$Downloads')
-			const ContentValues = plus.android.importClass('android.content.ContentValues')
-			if (!Downloads || !ContentValues) {
-				throw new Error('importClass 返回空（该基座可能没链入 MediaStore）')
-			}
-
-			trace.push('new ContentValues')
-			const values = new ContentValues()
-			callJava(values, 'put', staticField(Downloads, 'DISPLAY_NAME'), filename)
-			callJava(values, 'put', staticField(Downloads, 'MIME_TYPE'), 'application/json')
-			callJava(values, 'put', staticField(Downloads, 'RELATIVE_PATH'), 'Download')
-
-			trace.push('getContentResolver')
-			const main = plus.android.runtimeMainActivity()
-			resolver = callJava(main, 'getContentResolver')
-			if (!resolver) throw new Error('getContentResolver 返回空')
-
-			trace.push('insert')
-			uri = callJava(
-				resolver,
-				'insert',
-				staticField(Downloads, 'EXTERNAL_CONTENT_URI'),
-				values
-			)
-			if (!uri) throw new Error('系统拒绝创建文件（MediaStore 没返回 uri）')
-
-			trace.push('openOutputStream')
-			const os = callJava(resolver, 'openOutputStream', uri)
-			if (!os) throw new Error('无法打开输出流')
-
-			writeText(os, text, trace)
-
-			trace.push('ok')
-			resolve({ ok: true, where: `下载/${filename}`, trace: trace.join(' → ') })
-		} catch (e) {
-			// 失败时把刚建出来的空文件删掉，免得下载目录里留个 0 字节垃圾
-			try {
-				if (uri && resolver) callJava(resolver, 'delete', uri, null, null)
-			} catch (e2) {
-				/* 清理失败就算了 */
-			}
-			resolve({
-				ok: false,
-				error: String((e && e.message) || e),
-				trace: trace.join(' → '),
-			})
-		}
-	})
+	// 文本先转成 UTF-8 字节，再走和 zip 完全相同的字节写入路径 ——
+	// 三种导出共用一条经过核对验证的写入链，不再各写一套。
+	return writeBytesToMediaStore([utf8Bytes(text)], filename, 'application/json')
 }
-
 /* ---------------- 完整备份：读写文件 ---------------- */
+
+/** 文本 → UTF-8 字节（不依赖 TextEncoder：App 旧内核里不一定有） */
+function utf8Bytes(str) {
+	const t = String(str)
+	const out = []
+	for (let i = 0; i < t.length; i++) {
+		let c = t.charCodeAt(i)
+		if (c < 0x80) out.push(c)
+		else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+		else if (c >= 0xd800 && c <= 0xdbff) {
+			const c2 = t.charCodeAt(++i)
+			c = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00)
+			out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+		} else out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+	}
+	return new Uint8Array(out)
+}
 
 /** 有 plus 环境（App），但不限平台 */
 export function hasPlus() {
@@ -252,62 +161,137 @@ function bytesToLatin1(bytes) {
 }
 
 /**
- * 写法一：OutputStreamWriter + ISO-8859-1。
+ * 把字节块切成小块。
  *
- * 只往 Java 传**字符串**（Java 侧自己按 ISO-8859-1 编码成字节）。
- * 字符串是 Native.js 最基础的编组操作，最可能可靠。
+ * 真机上「写入成功但文件没变化」的根因就在这里：**Native.js 传参有长度限制**。
+ * 社区实测（DCloud #93515）Base64 字符串超过约 4KB 就可能失败，
+ * 过大的 bytes 传给 FileOutputStream.write 更是直接导致 0B 文件；
+ * 而且 plus.android.invoke 传 byte[] 参数本身已知不可靠（#220280、#107510）。
+ * 所以：只用字符串通道 + 分小块 + 写完核对实际大小。
  */
-async function writeViaWriter(os, chunks, trace) {
+export const WRITE_CHUNK_SIZES = [2048, 512, 128]
+
+async function* chunkBytes(chunks, size) {
+	for await (const c of chunks) {
+		if (!c || !c.length) continue
+		if (c.length <= size) {
+			yield c
+			continue
+		}
+		for (let i = 0; i < c.length; i += size) {
+			yield c.subarray(i, Math.min(i + size, c.length))
+		}
+	}
+}
+
+/**
+ * 把字节块写进 Java OutputStream。
+ *
+ * 用 OutputStreamWriter + ISO-8859-1：只往 Java 传**字符串**
+ * （Java 侧自己编码成字节），因为 byte[] 过桥不可靠。
+ * ISO-8859-1 是 U+0000~U+00FF 与字节一一映射，所以字符串里每个码点
+ * 恰好写成一个字节，二进制无损。
+ */
+async function writeViaWriter(os, chunks, trace, chunkSize) {
 	const OutputStreamWriter = plus.android.importClass('java.io.OutputStreamWriter')
 	if (!OutputStreamWriter) throw new Error('importClass 返回空（java.io）')
 	const w = new OutputStreamWriter(os, 'ISO-8859-1')
 	let total = 0
-	for await (const chunk of chunks) {
-		if (!chunk || !chunk.length) continue
+	for await (const piece of chunkBytes(chunks, chunkSize)) {
 		trace.push('encode')
-		const text = bytesToLatin1(chunk)
+		const text = bytesToLatin1(piece)
 		trace.push('write')
 		callJava(w, 'write', text)
-		total += chunk.length
+		total += piece.length
 	}
+	trace.push('flush')
 	callJava(w, 'flush')
 	callJava(w, 'close')
 	return total
 }
 
 /**
- * 写法二：java.lang.String.getBytes('ISO-8859-1') → OutputStream.write(byte[])。
+ * 往公共「下载」目录写一个文件（zip 与 JSON 共用这一条）。
  *
- * ⚠️ 真机上这一种**不报错但一个字节都没写进去**（被写入后的大小核对抓住）。
- * 很可能是 byte[] 过桥时编组失败且静默失败。保留它作为备选，
- * 因为不同基座的行为可能不一样。
+ * 块大小从大到小试，每种写完都回查 MediaStore 里的实际大小：
+ * Native.js 单次传参有长度限制（社区实测约 4KB 以上就可能失败），
+ * 而真机上的表现是**不报错但一个字节都没写进去** ——
+ * 所以「换更小的块 + 写完核对」不是可选项，是必需的。
  */
-async function writeViaBytes(os, chunks, trace) {
-	const JString = plus.android.importClass('java.lang.String')
-	if (!JString) throw new Error('importClass 返回空（java.lang）')
-	let total = 0
-	for await (const chunk of chunks) {
-		if (!chunk || !chunk.length) continue
-		trace.push('encode')
-		const jbytes = callJava(new JString(bytesToLatin1(chunk)), 'getBytes', 'ISO-8859-1')
-		if (!jbytes) throw new Error('字节转换失败（getBytes 返回空）')
-		trace.push('write')
-		callJava(os, 'write', jbytes)
-		total += chunk.length
+async function writeBytesToMediaStore(chunks, filename, mime) {
+	if (!isAndroid()) {
+		return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
 	}
-	callJava(os, 'flush')
-	callJava(os, 'close')
-	return total
-}
+	if (androidSdk() < 29) {
+		return { ok: false, unsupported: true, error: 'Android 10 以下暂不支持', trace: '' }
+	}
 
-/**
- * 把字节块写进 Java OutputStream 的几种写法，按顺序试。
- * 哪种能用只能在真机上验 —— 所以每种写完都要核对实际大小。
- */
-const WRITE_STRATEGIES = [
-	{ name: 'writer-iso', write: writeViaWriter },
-	{ name: 'bytes', write: writeViaBytes },
-]
+	plus.android.importClass('android.content.ContentResolver')
+	plus.android.importClass('java.io.OutputStream')
+	const Downloads = plus.android.importClass('android.provider.MediaStore$Downloads')
+	const ContentValues = plus.android.importClass('android.content.ContentValues')
+	if (!Downloads || !ContentValues) {
+		return { ok: false, error: 'importClass 返回空（该基座可能没链入 MediaStore）', trace: '' }
+	}
+
+	// 目标目录：图片进 Pictures，其余进 Download
+	const sub = mime && mime.indexOf('image/') === 0 ? 'Pictures' : 'Download'
+	const errors = []
+
+	for (const size of WRITE_CHUNK_SIZES) {
+		const tr = ['chunk=' + size]
+		let resolver = null
+		let uri = null
+		try {
+			tr.push('new ContentValues')
+			const values = new ContentValues()
+			callJava(values, 'put', staticField(Downloads, 'DISPLAY_NAME'), filename)
+			callJava(values, 'put', staticField(Downloads, 'MIME_TYPE'), mime)
+			callJava(values, 'put', staticField(Downloads, 'RELATIVE_PATH'), sub)
+
+			tr.push('getContentResolver')
+			const main = plus.android.runtimeMainActivity()
+			resolver = callJava(main, 'getContentResolver')
+			if (!resolver) throw new Error('getContentResolver 返回空')
+
+			tr.push('insert')
+			uri = callJava(resolver, 'insert', staticField(Downloads, 'EXTERNAL_CONTENT_URI'), values)
+			if (!uri) throw new Error('系统拒绝创建文件（MediaStore 没返回 uri）')
+
+			tr.push('openOutputStream')
+			const os = callJava(resolver, 'openOutputStream', uri)
+			if (!os) throw new Error('无法打开输出流')
+
+			const total = await writeViaWriter(os, chunks, tr, size)
+			if (!total) throw new Error('一个字节都没写进去')
+
+			tr.push('verify')
+			const got = querySize(resolver, uri)
+			if (got >= 0 && got !== total) {
+				throw new Error(`写了 ${total} 字节，实际只有 ${got} 字节`)
+			}
+
+			tr.push('ok')
+			return {
+				ok: true,
+				where: `${sub}/${filename}`,
+				bytes: total,
+				chunkSize: size,
+				trace: tr.join(' → '),
+			}
+		} catch (e) {
+			// 这次块大小不行：删掉半成品，换更小的块重来
+			try {
+				if (uri && resolver) callJava(resolver, 'delete', uri, null, null)
+			} catch (e2) {
+				/* 清理失败就算了 */
+			}
+			errors.push(`块 ${size}B: ${String((e && e.message) || e)}`)
+		}
+	}
+
+	return { ok: false, error: errors.join('  ｜  '), trace: '' }
+}
 
 /** 建目录（已存在就算了） */
 function ensureDir(absDir) {
@@ -338,41 +322,35 @@ export async function writeFileBytes(absPath, chunks) {
 	}
 
 	const errors = []
-
-	// 和写公共目录一样：两种写法都试，写完核对实际大小。
-	// 真机上 byte[] 那种写法「不报错但一个字节都没写进去」。
-	for (const st of WRITE_STRATEGIES) {
-		const sub = [st.name]
+	// 块大小从大到小试：写完用 File.length() 核对，对不上就换更小的块重来
+	for (const size of WRITE_CHUNK_SIZES) {
+		const sub = ['chunk=' + size]
 		let out = null
 		try {
-			sub.push('open')
 			out = new FileOutputStream(absPath)
-			const total = await st.write(out, chunks, sub)
+			const total = await writeViaWriter(out, chunks, sub, size)
 			out = null
 
-			// 核对：这个文件到底有多大
 			sub.push('verify')
-			let size = -1
+			let got = -1
 			try {
-				size = Number(callJava(new File(absPath), 'length'))
+				got = Number(callJava(new File(absPath), 'length'))
 			} catch (e) {
-				size = -1
+				got = -1
 			}
-			if (size >= 0 && size !== total) {
-				throw new Error(`写了 ${total} 字节，文件实际只有 ${size} 字节`)
+			if (got >= 0 && got !== total) {
+				throw new Error(`写了 ${total} 字节，文件实际只有 ${got} 字节`)
 			}
-
-			return { ok: true, bytes: total, method: st.name, trace: sub.join(' → ') }
+			return { ok: true, bytes: total, chunkSize: size, trace: sub.join(' → ') }
 		} catch (e) {
 			try {
 				if (out) callJava(out, 'close')
 			} catch (e2) {
 				/* 关不上就算了 */
 			}
-			errors.push(`${st.name}: ${String((e && e.message) || e)}`)
+			errors.push(`块 ${size}B: ${String((e && e.message) || e)}`)
 		}
 	}
-
 	return { ok: false, error: errors.join('  ｜  '), trace: '' }
 }
 
@@ -422,7 +400,11 @@ function querySize(resolver, uri) {
 			if (!callJava(cursor, 'moveToFirst')) return -1
 			const idx = callJava(cursor, 'getColumnIndex', staticField(MediaColumns, 'SIZE'))
 			if (idx < 0) return -1
-			return Number(callJava(cursor, 'getLong', idx))
+			// 必须是有限数字。拿到 undefined/NaN 时如果直接返回，
+			// 上层「got >= 0」会为假 → 核对被静默跳过 ——
+			// 一个会悄悄不执行的校验比没有校验更糟。
+			const n = Number(callJava(cursor, 'getLong', idx))
+			return isFinite(n) ? n : -1
 		} finally {
 			callJava(cursor, 'close')
 		}
@@ -442,96 +424,8 @@ function querySize(resolver, uri) {
  * Android 9+ 对非 SDK 接口有反射限制。所以整条中转去掉。
  */
 export async function writeBytesToDownloads(bytes, filename) {
-	const trace = []
-	if (!isAndroid()) {
-		return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
-	}
-	if (androidSdk() < 29) {
-		return { ok: false, unsupported: true, error: 'Android 10 以下暂不支持', trace: '' }
-	}
-
-	plus.android.importClass('android.content.ContentResolver')
-	plus.android.importClass('java.io.OutputStream')
-	const Downloads = plus.android.importClass('android.provider.MediaStore$Downloads')
-	const ContentValues = plus.android.importClass('android.content.ContentValues')
-	if (!Downloads || !ContentValues) {
-		return {
-			ok: false,
-			error: 'importClass 返回空（该基座可能没链入 MediaStore）',
-			trace: '',
-		}
-	}
-
-	const errors = []
-
-	// 两种写入写法都试，每种写完都回查实际大小。
-	// 真机上 byte[] 那种写法就是「不报错但一个字节都没写进去」，
-	// 所以「写完核对」不是多余的，是必需的。
-	for (const st of WRITE_STRATEGIES) {
-		const sub = [st.name]
-		let resolver = null
-		let uri = null
-		try {
-			sub.push('new ContentValues')
-			const values = new ContentValues()
-			callJava(values, 'put', staticField(Downloads, 'DISPLAY_NAME'), filename)
-			callJava(values, 'put', staticField(Downloads, 'MIME_TYPE'), 'application/zip')
-			callJava(values, 'put', staticField(Downloads, 'RELATIVE_PATH'), 'Download')
-
-			sub.push('getContentResolver')
-			const main = plus.android.runtimeMainActivity()
-			resolver = callJava(main, 'getContentResolver')
-			if (!resolver) throw new Error('getContentResolver 返回空')
-
-			sub.push('insert')
-			uri = callJava(
-				resolver,
-				'insert',
-				staticField(Downloads, 'EXTERNAL_CONTENT_URI'),
-				values
-			)
-			if (!uri) throw new Error('系统拒绝创建文件（MediaStore 没返回 uri）')
-
-			sub.push('openOutputStream')
-			const os = callJava(resolver, 'openOutputStream', uri)
-			if (!os) throw new Error('无法打开输出流')
-
-			const total = await st.write(os, [bytes], sub)
-			if (!total) throw new Error('一个字节都没写进去')
-
-			sub.push('verify')
-			const written = querySize(resolver, uri)
-			if (written >= 0 && written !== total) {
-				throw new Error(`写了 ${total} 字节，实际只有 ${written} 字节`)
-			}
-
-			sub.push('ok')
-			return {
-				ok: true,
-				where: `下载/${filename}`,
-				bytes: total,
-				method: st.name,
-				trace: sub.join(' → '),
-			}
-		} catch (e) {
-			// 这次尝试失败：把建出来的（可能空/半截的）文件删掉，再试下一种写法
-			try {
-				if (uri && resolver) callJava(resolver, 'delete', uri, null, null)
-			} catch (e2) {
-				/* 清理失败就算了 */
-			}
-			errors.push(`${st.name}: ${String((e && e.message) || e)}`)
-			trace.push(sub.join(' → '))
-		}
-	}
-
-	return {
-		ok: false,
-		error: errors.join('  ｜  '),
-		trace: trace.join(' ； '),
-	}
+	return writeBytesToMediaStore([bytes], filename, 'application/zip')
 }
-
 /**
  * 读一个 content:// uri（SAF 选来的文件）→ base64。
  *

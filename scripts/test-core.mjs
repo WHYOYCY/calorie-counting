@@ -904,6 +904,8 @@ function fakePlus(opts = {}) {
 	const files = new Map()
 	const calls = []
 	const resolver = { _kind: 'resolver' }
+	// 旧 mock 的 invoke 不把接收者传给实现，cursor.getLong 只能靠这个闭包变量
+	let lastCursorSize = 0
 
 	const impl = {
 		activity: {
@@ -920,6 +922,13 @@ function fakePlus(opts = {}) {
 				if (opts.openNull) return null
 				return { _kind: 'os', uri: uri && uri.url }
 			},
+			query: (uri) => {
+				// 旧 mock 不传接收者给实现，所以把刚查到的大小存到闭包里，
+				// 由 cursor.getLong 取用
+				const d = uri && files.get(uri.url)
+				lastCursorSize = d ? String(d.text || '').length : 0
+				return { _kind: 'cursor' }
+			},
 			delete: (uri) => {
 				files.delete(uri && uri.url)
 				return 1
@@ -934,9 +943,17 @@ function fakePlus(opts = {}) {
 			flush: () => {},
 			close: () => {},
 		},
+		cursor: {
+			moveToFirst: () => true,
+			getColumnIndex: () => 0,
+			getLong: () => lastCursorSize,
+			close: () => {},
+		},
 		writer: {
 			write: (x) => {
 				if (opts.writerThrows) throw new Error('OutputStreamWriter 不可用')
+				// maxChunkBytes 模拟长度限制：超长静默丢弃
+				if (opts.maxChunkBytes && String(x).length > opts.maxChunkBytes) return
 				const last = [...files.values()].pop()
 				if (last) last.text += String(x)
 			},
@@ -1018,7 +1035,7 @@ await withPlus({}, async (env) => {
 	eq(res.ok, true, '★ 能成功写入')
 
 eq([...env.files.values()][0].text, '{"a":1}', '★ 内容完整落盘')
-	ok(String(res.where).includes('下载/'), '返回可读位置')
+	ok(String(res.where).includes('Download/'), '返回可读位置')
 	ok(
 		env.calls.some((c) => c.indexOf('ContentResolver') >= 0),
 		'★ 先 importClass 了 ContentResolver（方法才可见）'
@@ -1034,8 +1051,9 @@ await withPlus({ noInvoke: true }, async () => {
 		`★ 给出看得懂的原因而不是 TypeError：${res.error}`
 	)
 	ok(
-		String(res.trace).indexOf('getContentResolver') >= 0,
-		`trace 指到出问题的环节：${res.trace}`
+		String(res.trace).indexOf('getContentResolver') >= 0 ||
+			String(res.error).indexOf('未暴露给 JS') >= 0,
+		`trace/错误能指到出问题的环节：${res.trace || res.error}`
 	)
 })
 
@@ -1047,7 +1065,10 @@ await withPlus({ missingMethod: 'insert' }, async (env) => {
 		String(res.error).indexOf('is not a function') >= 0,
 		`★ 复现真机那类报错：${res.error}`
 	)
-	ok(String(res.trace).indexOf('insert') >= 0, `trace 指到 insert：${res.trace}`)
+	ok(
+		String(res.error).indexOf('insert') >= 0 || String(res.trace).indexOf('insert') >= 0,
+		`trace/错误能指到 insert：${res.error || res.trace}`
+	)
 })
 
 await withPlus({}, async (env) => {
@@ -1075,21 +1096,23 @@ await withPlus({ openNull: true }, async (env) => {
 	eq(env.files.size, 0, '★ 失败时把刚建的空文件删掉了（不留 0 字节垃圾）')
 })
 
-await withPlus({ writerThrows: true }, async (env) => {
+// byte[] 那条路已被移除：Native.js 传 byte[] 参数本身不可靠
+// （DCloud #220280、#107510），所以 OutputStreamWriter 失败就是失败，
+// 不再退回一条更不可靠的路。
+await withPlus({ writerThrows: true }, async () => {
 	const res = await saveToDownloads('hello', 'c.json')
-	eq(res.ok, true, '★ OutputStreamWriter 失败时退回 getBytes 写法')
-	eq(res.trace.indexOf('getBytes') >= 0, true, `trace 显示换了写法：${res.trace}`)
-	// getBytes 走的是 byte[]，内容由 mock 标记，能看出确实走了第二条路
-	eq([...env.files.values()][0].text, '<bytes>', '确实走了 getBytes 那条路')
+	eq(res.ok, false, '★ OutputStreamWriter 不可用时报失败，而不是假装成功')
+	ok(String(res.error).indexOf('OutputStreamWriter') >= 0, `原因说清楚：${res.error}`)
 })
 
-await withPlus({ writerThrows: true, writeThrows: true }, async () => {
-	const res = await saveToDownloads('x', 'd.json')
-	eq(res.ok, false, '两条写法都失败 → 失败')
-	ok(
-		String(res.error).indexOf('Writer') >= 0 && String(res.error).indexOf('getBytes') >= 0,
-		`★ 两种写法的错都报出来：${res.error}`
-	)
+// 大文本也要分块写（Native.js 单次传参有长度限制）
+await withPlus({ maxChunkBytes: 1024 }, async (env) => {
+	const big = 'x'.repeat(5000)
+	const res = await saveToDownloads(big, 'big.json')
+	eq(res.ok, true, '★ 大文本分块写入成功')
+	eq(res.chunkSize, 512, `自动降到能用的块大小：${res.chunkSize}`)
+	const doc = [...env.files.values()].find(Boolean)
+	eq(doc && doc.text && doc.text.length, 5000, '★ 5000 个字符全部写入（没有被长度限制截断）')
 })
 
 await withPlus({ importNullFor: 'android.provider.MediaStore$Downloads' }, async () => {
@@ -1569,12 +1592,25 @@ function fakeJavaFs(opts = {}) {
 			flush: () => {},
 			close: () => {},
 		},
+		writer: {
+			// 按 ISO-8859-1 写：每个码点恰好一个字节
+			write: (o, text) => {
+				// maxChunkBytes 模拟「Native.js 传参长度限制」：超长静默丢弃
+				if (opts.maxChunkBytes && text.length > opts.maxChunkBytes) return
+				const list = files.get(o.os.path) || []
+				for (let i = 0; i < text.length; i++) list.push(text.charCodeAt(i) & 0xff)
+				files.set(o.os.path, list)
+			},
+			flush: () => {},
+			close: () => {},
+		},
 		file: {
 			exists: (o) => files.has(o.path) || dirs.has(o.path),
 			mkdirs: (o) => {
 				dirs.add(o.path)
 				return true
 			},
+			length: (o) => (files.get(o.path) ? files.get(o.path).length : 0),
 		},
 		fis: {
 			readAllBytes: (o) => {
@@ -1598,6 +1634,10 @@ function fakeJavaFs(opts = {}) {
 		},
 		'java.io.File': function File(p) {
 			return { _kind: 'file', path: p }
+		},
+		'java.io.OutputStreamWriter': function OutputStreamWriter(os, enc) {
+			if (opts.writerThrows) throw new Error('OutputStreamWriter 不可用')
+			return { _kind: 'writer', os, enc }
 		},
 		'java.io.FileInputStream': function FileInputStream(p) {
 			if (opts.readOpenThrows) throw new Error('打开文件失败')
@@ -1694,23 +1734,37 @@ await withJavaFs({}, async (env) => {
 	eq(res.ok, true, '接受数组形式的块')
 })
 
-group('native-fs.js · 写文件的失败路径')
+group('native-fs.js · 写文件的失败路径与分块')
 
-await withJavaFs({ getBytesNull: true }, async () => {
+await withJavaFs({ writerThrows: true }, async () => {
 	const res = await NFS.writeFileBytes('ABS:/tmp/d.zip', [ALL_BYTES])
-	eq(res.ok, false, 'getBytes 返回空 → 失败')
-	ok(String(res.error).indexOf('字节转换') >= 0, `给出可读原因：${res.error}`)
-})
-
-await withJavaFs({ writeThrows: true }, async () => {
-	const res = await NFS.writeFileBytes('ABS:/tmp/e.zip', [ALL_BYTES])
-	eq(res.ok, false, 'write 抛异常 → 失败而不是崩')
+	eq(res.ok, false, 'OutputStreamWriter 不可用 → 失败而不是假装成功')
+	ok(
+		String(res.error).indexOf('OutputStreamWriter') >= 0,
+		`原因说清楚：${res.error}`
+	)
+	ok(
+		String(res.error).indexOf('块 2048B') >= 0 && String(res.error).indexOf('块 128B') >= 0,
+		`★ 每种块大小都试过并各自报了原因：${res.error}`
+	)
 })
 
 await withJavaFs({ importNullFor: 'java.io.FileOutputStream' }, async () => {
 	const res = await NFS.writeFileBytes('ABS:/tmp/f.zip', [ALL_BYTES])
 	eq(res.ok, false, 'importClass 返回空 → 失败')
 	ok(String(res.error).indexOf('链入') >= 0, `提示基座问题：${res.error}`)
+})
+
+// 大块写不进去时要自动换更小的块（真机限制）
+await withJavaFs({ maxChunkBytes: 512 }, async (env) => {
+	const BIG = new Uint8Array(5000)
+	for (let i = 0; i < BIG.length; i++) BIG[i] = (i * 3) & 0xff
+	const res = await NFS.writeFileBytes('ABS:/tmp/big.zip', [BIG])
+	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
+	eq(res.chunkSize, 512, `实际用的块大小：${res.chunkSize}`)
+	const got = env.files.get('ABS:/tmp/big.zip')
+	eq(got.length, 5000, '★ 5000 字节全部写入')
+	eq(got[4999], BIG[4999], '末字节对')
 })
 
 group('photo.js · 读取失败时要能看出是哪一环')
@@ -1756,6 +1810,9 @@ function fakeMediaStore(opts = {}) {
 		const box = boxOf(h)
 		if (!box) return
 		if (opts.dropWrites) return // 模拟真机：不报错但一个字节都没写进去
+		// maxChunkBytes 模拟「Native.js 传参长度限制」：
+		// 超过这个长度的块静默丢弃（真机就是这样）
+		if (opts.maxChunkBytes && bytes.length > opts.maxChunkBytes) return
 		for (let i = 0; i < bytes.length; i++) box.bytes.push(bytes[i])
 	}
 
@@ -1912,7 +1969,7 @@ await withMediaStore({}, async (env) => {
 	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'bak.zip')
 	eq(res.ok, true, '写入成功')
 	eq(res.bytes, 256, '写入字节数对')
-	ok(String(res.where).indexOf('下载/') >= 0, `返回可读位置：${res.where}`)
+	ok(String(res.where).indexOf('Download/') >= 0, `返回可读位置：${res.where}`)
 	const doc = env.docs.get(env.firstUri())
 
 eq(doc.name, 'bak.zip', '文件名写进了 MediaStore')
@@ -1935,8 +1992,8 @@ await withMediaStore({ dropWrites: true }, async (env) => {
 		`★ 直接说出「写了多少、实际多少」：${res.error}`
 	)
 	ok(
-		String(res.error).indexOf('writer-iso') >= 0 && String(res.error).indexOf('bytes') >= 0,
-		`★ 两种写法的失败原因都报出来（能看出不是所有路都试过了）：${res.error}`
+		String(res.error).indexOf('块 2048B') >= 0 && String(res.error).indexOf('块 128B') >= 0,
+		`★ 每种块大小的失败原因都报出来（能看出块大小不是唯一原因）：${res.error}`
 	)
 	eq(env.docs.size, 0, '★ 失败时把那个空文件删掉了')
 })
@@ -1952,23 +2009,28 @@ await withMediaStore({ openOutNull: true }, async (env) => {
 	eq(env.docs.size, 0, '失败时清理了空文件')
 })
 
-group('native-fs.js · 写法一挂了要能退到写法二')
+group('native-fs.js · 大块写不进去时要自动换更小的块')
 
-await withMediaStore({ writerThrows: true }, async (env) => {
-	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'fb.zip')
-	eq(res.ok, true, '★ OutputStreamWriter 不可用时退回 byte[] 写法，仍然成功')
-	eq(res.method, 'bytes', `实际用的是：${res.method}`)
-	const doc = [...env.docs.values()].find((d) => d.name === 'fb.zip')
-	eq(doc.bytes.length, 256, '内容完整')
-	eq(doc.bytes[0], 0, '首字节对')
-	eq(doc.bytes[255], 255, '末字节对')
+// 真机上大块会静默失败。这里模拟「只有 <=512 字节的块才写得进去」，
+// 看它能不能自动从 2048 降到 512 并把内容写对。
+await withMediaStore({ maxChunkBytes: 512 }, async (env) => {
+	const BIG = new Uint8Array(5000)
+	for (let i = 0; i < BIG.length; i++) BIG[i] = (i * 7) & 0xff
+
+	const res = await NFS.writeBytesToDownloads(BIG, 'big.zip')
+	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
+	eq(res.chunkSize, 512, `实际用的块大小：${res.chunkSize}`)
+	const doc = [...env.docs.values()].find((d) => d.name === 'big.zip')
+	eq(doc.bytes.length, 5000, '★ 5000 字节全部写入')
+	eq(doc.bytes[0], BIG[0], '首字节对')
+	eq(doc.bytes[4999], BIG[4999], '末字节对')
 })
 
-// 写法一（预期真机可用）单独验一遍
+// 小块能过时应该一次就成
 await withMediaStore({}, async (env) => {
 	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'w1.zip')
-	eq(res.ok, true, '写法一可用时成功')
-	eq(res.method, 'writer-iso', `默认用写法一：${res.method}`)
+	eq(res.ok, true, '正常情况一次成功')
+	eq(res.chunkSize, 2048, `默认块大小：${res.chunkSize}`)
 })
 
 group('native-fs.js · 从 SAF 读回（全程原生）')
