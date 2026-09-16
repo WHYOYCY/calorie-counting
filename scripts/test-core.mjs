@@ -72,7 +72,7 @@ import {
 	clearSnapshots,
 	SNAPSHOT_KEEP,
 } from '../src/core/backup.js'
-import { photoPathFor, photoSrc, deletePhotoFile, splitDataUrl } from '../src/core/photo.js'
+import { photoPathFor, photoSrc, deletePhotoFile, splitDataUrl, toBase64 } from '../src/core/photo.js'
 import {
 	RECOGNITION_PROMPT,
 	PING_PROMPT,
@@ -1575,6 +1575,15 @@ function fakeJavaFs(opts = {}) {
 				return true
 			},
 		},
+		fis: {
+			readAllBytes: (o) => {
+				if (opts.readThrows) throw new Error('readAllBytes 失败')
+				const list = files.get(o.path)
+				if (!list) throw new Error('文件不存在')
+				return Uint8Array.from(list)
+			},
+			close: () => {},
+		},
 	}
 
 	const classes = {
@@ -1589,12 +1598,26 @@ function fakeJavaFs(opts = {}) {
 		'java.io.File': function File(p) {
 			return { _kind: 'file', path: p }
 		},
+		'java.io.FileInputStream': function FileInputStream(p) {
+			if (opts.readOpenThrows) throw new Error('打开文件失败')
+			if (!files.has(p) && opts.missingFileThrows) throw new Error('文件不存在')
+			return { _kind: 'fis', path: p }
+		},
+	}
+
+	const Bas64 = {
+		NO_WRAP: 2,
+		encodeToString: (bytes) => {
+			// 真的按 base64 编码，这样往返测试才有意义
+			return Buffer.from(Uint8Array.from(bytes)).toString('base64')
+		},
 	}
 
 	const android = {
 		importClass: (name) => {
 			calls.push(name)
 			if (opts.importNullFor === name) return null
+			if (name === 'android.util.Base64') return Bas64
 			return classes[name] || {}
 		},
 		invoke: function (obj, name) {
@@ -1734,6 +1757,73 @@ eq(
 	(await withJavaFs({}, () => NFS.writePrivateFile(new Uint8Array([1]), 'x.zip'))).ok,
 	true,
 	'没有 plus.io 也能拿到路径（走 convertLocalFileSystemURL）'
+)
+
+group('native-fs.js · 二进制写入→原生读回 完整往返')
+
+// 关键：写用 ISO-8859-1 过桥，读用 InputStream → Base64。
+// 两条路都经过「字节→字符串→字节」的转换，往返一致就说明两处都对。
+await withJavaFs({}, async (env) => {
+	const wrote = await NFS.writeFileBytes('ABS:/tmp/rt.zip', [ALL_BYTES])
+	eq(wrote.ok, true, '先写进去 256 种字节')
+
+	const read = await NFS.readFileBase64Native('ABS:/tmp/rt.zip')
+	eq(read.ok, true, '原生读取成功')
+	const roundTrip = Buffer.from(read.base64, 'base64')
+	eq(roundTrip.length, 256, '读回的字节数对')
+	eq(
+		[...roundTrip].join(','),
+		[...ALL_BYTES].join(','),
+		'★ 写入→读回 全部 256 种字节值逐字节一致'
+	)
+})
+
+// 多块流式写入后读回，也要完整
+await withJavaFs({}, async () => {
+	const a = new Uint8Array([0, 1, 2])
+	const b = new Uint8Array(1000).fill(200)
+	const c = new Uint8Array([255])
+	await NFS.writeFileBytes('ABS:/tmp/rt2.zip', [a, b, c])
+	const read = await NFS.readFileBase64Native('ABS:/tmp/rt2.zip')
+	const got = Buffer.from(read.base64, 'base64')
+	eq(got.length, 1004, '多块拼接后长度对')
+	eq(got[0] === 0 && got[3] === 200 && got[1003] === 255, true, '首/中/尾字节都对')
+})
+
+group('native-fs.js · 原生读取的失败路径')
+
+await withJavaFs({ readThrows: true }, async () => {
+	const r = await NFS.readFileBase64Native('ABS:/tmp/x.zip')
+	eq(r.ok, false, 'readAllBytes 抛异常 → 失败而不是崩')
+	ok(String(r.error).indexOf('readAllBytes') >= 0, `报出环节：${r.error}`)
+})
+
+await withJavaFs({ importNullFor: 'android.util.Base64' }, async () => {
+	const r = await NFS.readFileBase64Native('ABS:/tmp/x.zip')
+	eq(r.ok, false, 'importClass 返回空 → 失败')
+	ok(String(r.error).indexOf('链入') >= 0, `提示基座问题：${r.error}`)
+})
+
+eq(
+	(await withJavaFs({}, () => NFS.readFileBase64Native('ABS:/tmp/never.zip'))).ok,
+	false,
+	'文件不存在时返回失败而不是抛异常'
+)
+
+group('photo.js · 读取失败时要能看出是哪一环')
+
+// Node 里既没有 File 对象、也没有 plus、也没有 FileSystemManager
+const b64fail = await toBase64('_doc/food/x.jpg', null)
+eq(b64fail.ok, false, '读不到就是失败')
+ok(Array.isArray(b64fail.tried), '★ 带上了每一步的结果')
+eq(b64fail.tried.length, 4, '★ 四条读取路径都报了')
+ok(
+	String(b64fail.tried.join(' ')).indexOf('没有 File') >= 0,
+	`★ 说清楚是「没有 File」而不是笼统的读取失败：${JSON.stringify(b64fail.tried)}`
+)
+ok(
+	String(b64fail.tried.join(' ')).indexOf('plus.io') >= 0,
+	'列举了 plus.io 这一环'
 )
 
 /* ---------------- 汇总 ---------------- */

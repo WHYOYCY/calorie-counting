@@ -464,6 +464,46 @@ export function copyPrivateToDownloads(privatePath, filename) {
 }
 
 /**
+ * 用 Native.js 直接读文件并返回 base64 —— 完全绕开 plus.io 的文件层。
+ *
+ * 为什么需要：SAF 选完文件后用 plus.io.resolveLocalFileSystemURL 读那个
+ * 临时文件时真机报「读取所选文件失败」，而那个失败没有告诉任何细节。
+ * 所以加一条不依赖 plus.io 的读取路径（InputStream → Base64）。
+ * readAllBytes 是 API 26+ 的。
+ */
+export async function readFileBase64Native(absPath) {
+	const trace = []
+	if (!isAndroid()) {
+		return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
+	}
+	try {
+		trace.push('importClass')
+		const FileInputStream = plus.android.importClass('java.io.FileInputStream')
+		const Base64 = plus.android.importClass('android.util.Base64')
+		if (!FileInputStream || !Base64) {
+			throw new Error('importClass 返回空（基座可能没链入 java.io / android.util）')
+		}
+
+		trace.push('open')
+		const input = new FileInputStream(absPath)
+
+		trace.push('readAllBytes')
+		const bytes = callJava(input, 'readAllBytes')
+		callJava(input, 'close')
+		if (!bytes) throw new Error('readAllBytes 返回空')
+
+		trace.push('encodeToString')
+		const b64 = callJava(Base64, 'encodeToString', bytes, staticField(Base64, 'NO_WRAP'))
+		if (!b64) throw new Error('Base64 编码返回空')
+
+		trace.push('ok')
+		return { ok: true, base64: String(b64), trace: trace.join(' → ') }
+	} catch (e) {
+		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
+	}
+}
+
+/**
  * 让用户选一个文件（SAF，ACTION_OPEN_DOCUMENT），读成字节。
  *
  * ⚠️ 这条路最不确定：要重写 Activity.onActivityResult，
@@ -539,12 +579,14 @@ export function pickFileBytes(opts = {}) {
 					// 先落成私有临时文件，再用 plus.io 读（避免二进制过 JS 桥）
 					const tmpName = 'picked-' + Date.now() + '.zip'
 					const dest = plus.io.convertLocalFileSystemURL('_doc/' + tmpName)
+					if (!dest) throw new Error('拿不到临时文件的绝对路径')
 					const out = new FileOutputStream(dest)
 					callJava(FileUtils, 'copy', input, out)
 					callJava(out, 'flush')
 					callJava(out, 'close')
 					callJava(input, 'close')
-					done({ ok: true, path: '_doc/' + tmpName, bytes: 0, mode: 'file' })
+					// 两个路径都返回：后面读取先试 _doc 形式，不行再用绝对路径走原生命令
+					done({ ok: true, path: '_doc/' + tmpName, absPath: dest, mode: 'file' })
 				} catch (e) {
 					done({ ok: false, error: String((e && e.message) || e) })
 				}

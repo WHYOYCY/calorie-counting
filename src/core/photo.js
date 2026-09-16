@@ -87,18 +87,18 @@ function readByPlusIo(path) {
 						reader.onloadend = (e) => {
 							const { base64, mime } = splitDataUrl(e && e.target && e.target.result)
 							if (!base64) {
-								resolve({ ok: false, fallback: true })
+								resolve({ ok: false, fallback: true, reason: '读出来是空' })
 								return
 							}
 							resolve({ ok: true, base64, mime })
 						}
-						reader.onerror = () => resolve({ ok: false, fallback: true })
+						reader.onerror = () => resolve({ ok: false, fallback: true, reason: 'FileReader 出错（文件可能太大）' })
 						reader.readAsDataURL(file)
 					},
-					() => resolve({ ok: false, fallback: true })
+					() => resolve({ ok: false, fallback: true, reason: 'entry.file 失败' })
 				)
 			},
-			() => resolve({ ok: false, fallback: true })
+			() => resolve({ ok: false, fallback: true, reason: 'resolveLocalFileSystemURL 解析不到' })
 		)
 	})
 }
@@ -178,23 +178,31 @@ async function readByUrl(url) {
  * @returns {Promise<{ok:boolean, base64?:string, mime?:string, error?:string}>}
  */
 export async function toBase64(path, file) {
+	// 每一步都记下来。这类跨层读取失败时，「哪一环失败的」比错误码有用得多 ——
+	// 早先只返回一句「读取失败」，只能靠猜。
+	const tried = []
+
 	// H5 优先：直接读 File/Blob，最可靠
 	const byFile = await readByFileReader(file)
 	if (byFile.ok) return byFile
+	tried.push('File 对象：' + (file ? '读取失败' : '没有 File'))
 
 	// 次选：blob: / data: URL（H5 落盘失败后的兜底路径）
 	const byUrl = await readByUrl(path)
 	if (byUrl.ok) return byUrl
+	tried.push('URL 读取：不是 blob/data 或不支持')
 
 	// App 首选：plus.io
 	const byPlus = await readByPlusIo(path)
 	if (byPlus.ok) return byPlus
+	tried.push('plus.io：' + (byPlus.reason || '失败'))
 
 	// 再次：小程序/部分 App 运行时的文件系统 API
 	const byFs = await readByFileSystemManager(path)
 	if (byFs.ok) return byFs
+	tried.push('FileSystemManager：不可用')
 
-	return { ok: false, error: '读取图片失败，请换一张图或改用手动记录' }
+	return { ok: false, error: '读取图片失败，请换一张图或改用手动记录', tried }
 }
 
 /* ---------------- 落盘 / 删除 ---------------- */

@@ -12,6 +12,7 @@ import {
 	removePrivateFile,
 	copyPrivateToDownloads,
 	pickFileBytes,
+	readFileBase64Native,
 } from './native-fs.js'
 
 export function backupFileName() {
@@ -344,12 +345,36 @@ export async function pickZipFile() {
 		return { ok: false, error: '这个备份文件太大了，当前版本不支持' }
 	}
 
+	// 第一条：plus.io 的文件层（与照片识别同一条路）
 	const b64 = await toBase64(picked.path, null)
-	removePrivateFile(picked.path)
-	if (!b64.ok) {
-		return { ok: false, error: '读取所选文件失败', trace: picked.trace }
+	if (b64.ok) {
+		removePrivateFile(picked.path)
+		return { ok: true, bytes: base64ToBytes(b64.base64), trace: picked.trace }
 	}
-	return { ok: true, bytes: base64ToBytes(b64.base64), trace: picked.trace }
+
+	// 第二条：绕开 plus.io，用 Native.js 直接读（InputStream → Base64）
+	// 真机上 plus.io 读这个临时文件失败过，所以要有一条不依赖它的路
+	let native = { ok: false, error: '没有绝对路径可用' }
+	if (picked.absPath) native = await readFileBase64Native(picked.absPath)
+
+	removePrivateFile(picked.path)
+
+	if (native.ok) {
+		return { ok: true, bytes: base64ToBytes(native.base64), trace: picked.trace }
+	}
+
+	// 两条都失败：把每条路的失败原因都摆出来，不让人只能靠猜
+	return {
+		ok: false,
+		error: '读取所选文件失败',
+		trace: [
+			picked.trace,
+			'plus.io: ' + (b64.tried || []).join(' / '),
+			'native: ' + (native.trace || native.error),
+		]
+			.filter(Boolean)
+			.join('  ｜  '),
+	}
 }
 
 /** 读私有文件的大小（读不到返回 0，交给后面的读取去报错） */
