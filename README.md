@@ -78,7 +78,7 @@ npm run test:core # 只跑核心逻辑单元测试
    `plus.android.importClass()` **不会在当前作用域创建同名绑定**，
    不接收返回值就等于没导入，真机会报「Xxx is not defined」。
    这类错误单元测试永远抓不到：测试里的假 plus 是手写的，类永远存在。
-3. **核心逻辑单元测试**（427 项断言）—— 日期与餐次归类、营养换算、
+3. **核心逻辑单元测试**（428 项断言）—— 日期与餐次归类、营养换算、
    数据层增删改查与迁移、统计聚合、DashScope 请求契约。
 
 核心逻辑（`src/core/`）不依赖 uni 运行时，靠运行时特性探测解耦，
@@ -196,6 +196,8 @@ uni-app 的 App 端不是浏览器环境（没有 `document` / `window` / `Blob`
 | 读文本读出来是双重编码 | 用 `readAsDataURL` 读一个内容本身就是 base64 的文本文件，会把内容**再** base64 一次 | 读文本用 `readAsText`，只有读二进制才用 `readAsDataURL` |
 | 写入大小核对永远失败 | 拿字符串 `length`（字符数）去比文件大小（字节数），备份 JSON 里有中文必然对不上 | 用 `utf8Length()` |
 | 写完了不知道成没成 | 静默失败没有任何信号 | **每次写入都回查字节数**，对不上就报失败 |
+| `write 异常：[object Object]` | plus.io 的 FileWriter 是**异步**的：上一个动作（`truncate`/`write`）没回调就调下一个会抛异常；而且它抛的异常带的是 `name`/`code` 不是 `message`，拼出来只有 `[object Object]` | 每个动作都等回调（`truncate` 加超时兜底），错误统一走 `errText()` 把所有字段捞出来 |
+| 文件管理器看不到导出的备份 | `_downloads` 是**应用私有**目录（`Android/data/<包名>/downloads`） | 导出优先挑**手机公共**的 Download/Documents（真写一个探针文件验证过才用），不行就用系统分享把文件发出去 |
 
 ### 备份与照片是怎么存的
 

@@ -63,15 +63,25 @@ export async function runSelfTest() {
 		PIO.hasPlusIo() ? '读写文件的基础，必备' : '不可用 —— 照片与备份都无法保存'
 	)
 
-	const outDirs = await PIO.outDirCandidates()
-	if (outDirs.length) {
-		add(
-			'导出位置',
-			outDirs[0].visible,
-			`${outDirs[0].label}${outDirs[0].visible ? '（文件管理器里能看到）' : '（看得到？看不到，得靠分享）'}`
-		)
-	} else {
-		add('导出位置', false, '一个可用目录都没有')
+	// 导出位置：只要有一个能写就算通过。能不能被文件管理器看到是另一回事
+	// （看不到也不影响用，用「分享」把文件发出去就行）——
+	// 早先把「私有目录」记成不通，看起来像坏了，其实是正常情况。
+	try {
+		const targets = await PIO.exportTargets()
+		const pub = targets.filter((t) => t.public)
+		if (!targets.length) {
+			add('导出位置', false, '一个能写的目录都没有')
+		} else {
+			add(
+				'导出位置',
+				true,
+				pub.length
+					? `能直接写到${pub.map((t) => t.label).join('、')}（文件管理器里能看到）`
+					: `只能写到${targets[0].label}（私有目录，文件管理器看不到，导出后用「分享」发出去）`
+			)
+		}
+	} catch (e) {
+		add('导出位置', false, String((e && e.message) || e))
 	}
 
 	/* ---- 2. 应用真正依赖的路径：plus.io 文本读写 ---- */
@@ -119,12 +129,15 @@ export async function runSelfTest() {
 					+ '从别的手机导回来时，如果这里读不到，就只能靠应用自己的下载目录。'
 			)
 		} else {
-			const list = await PIO.findBackupsAt(pubs[0].abs, 'calorie-backup')
+			const found = await PIO.findBackupsAt(pubs[0].abs, 'calorie-backup')
+			const writable = []
+			for (const d of pubs) if (await PIO.canWriteAt(d.abs)) writable.push(d.label)
 			add(
 				'手机公共目录',
 				true,
-				`能读 ${pubs.map((p) => p.label).join('、')}`
-					+ (list.length ? `（里面有 ${list.length} 个备份文件）` : '（暂时没有备份文件）')
+				`能读 ${pubs.map((x) => x.label).join('、')}`
+					+ (writable.length ? `，且能写入 ${writable.join('、')}` : '（但写不进去，导出还得靠分享）')
+					+ (found.length ? `；里面有 ${found.length} 个备份文件` : '')
 			)
 		}
 	} catch (e) {
@@ -183,8 +196,12 @@ export async function runSelfTest() {
 		const written = await PIO.writeText(`${TMP_DIR}selsrc.txt`, TEST_TEXT)
 		const fromAbs = abs(`${TMP_DIR}selsrc.txt`)
 		const copied = await new Promise((resolve) => {
-			if (!written.ok || typeof plus === 'undefined' || !plus || !plus.io) {
+			if (typeof plus === 'undefined' || !plus || !plus.io) {
 				resolve({ ok: false, error: 'plus.io 不可用' })
+				return
+			}
+			if (!written.ok) {
+				resolve({ ok: false, error: '前面的写入就没成，这条没法验' })
 				return
 			}
 			plus.io.resolveLocalFileSystemURL(

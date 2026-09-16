@@ -14,10 +14,12 @@ import {
 	fileSizeAt,
 	findBackups,
 	findBackupsAt,
+	exportTargets,
 	hasPlusIo,
-	outDirCandidates,
 	publicDirCandidates,
 	readText,
+	writeTextAt,
+	writeTextAtChecked,
 	writeTextChecked,
 } from './plusio.js'
 
@@ -337,21 +339,22 @@ export async function exportFullBackupText(text, filename = backupFileName()) {
 
 	if (!hasPlusIo()) return { ok: false, error: '当前环境不支持导出文件' }
 
-	const dirs = await outDirCandidates()
+	const dirs = await exportTargets()
 	const tried = []
 	for (const d of dirs) {
-		const url = `${d.url}/${filename}`
-		const w = await writeTextChecked(url, body)
-		if (!w.ok) {
-			tried.push(`${d.label}：${w.error}`)
+		const triedOne = d.public
+			? await writeTextAtChecked(d.abs, filename, body)
+			: await writeTextChecked(`${d.url}/${filename}`, body)
+		if (!triedOne.ok) {
+			tried.push(`${d.label}：${triedOne.error}`)
 			continue
 		}
 		return {
 			ok: true,
-			where: url,
-			absPath: absOf(url),
-			userVisible: d.visible,
-			bytes: w.bytes,
+			where: triedOne.abs || `${d.url}/${filename}`,
+			absPath: triedOne.abs || absOf(`${d.url}/${filename}`),
+			userVisible: !!d.visible,
+			bytes: triedOne.bytes,
 			dirLabel: d.label,
 		}
 	}
@@ -367,7 +370,7 @@ export async function listBackupFiles() {
 	if (!hasPlusIo()) return { ok: true, files: [] }
 	const out = []
 	const seen = new Set()
-	for (const d of await outDirCandidates()) {
+	for (const d of await exportTargets()) {
 		const found = await findBackups(d.url, 'calorie-backup')
 		for (const f of found) {
 			if (seen.has(f.name)) continue

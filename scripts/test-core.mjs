@@ -1829,6 +1829,21 @@ function fakePlusIO(opts = {}) {
 				dirs.delete(abs)
 				cb && cb()
 			},
+			// 目录上也能建文件/子目录（真机的 DirectoryEntry 就是这样，
+			// 公共目录只能走这条路 —— 没有 fs.root 可用）
+			getFile: (name, o, ok, fail) => {
+				if (opts.noDirs) return fail && fail(new Error('写不进去'))
+				const p = abs.replace(/\/$/, '') + '/' + String(name)
+				dirs.add(abs)
+				if (!files.has(p)) files.set(p, '')
+				ok(entryOf(p))
+			},
+			getDirectory: (name, o, ok, fail) => {
+				if (opts.noDirs) return fail && fail(new Error('建不了目录'))
+				const p = abs.replace(/\/$/, '') + '/' + String(name)
+				if (!files.has(p)) dirs.add(p)
+				ok(entryOf(p))
+			},
 			// copyTo：应用已不再用它（真机上会静默失败），但自检会探测它，
 			// 所以 mock 里按「正常工作的 plus.io」实现，供那条探针用
 			copyTo: (dir, name, ok, fail) => {
@@ -2124,7 +2139,15 @@ await withPlusIO({}, async (env) => {
 	// 写进「下载目录」
 	const out = await BK.exportFullBackupText(built.text, 'calorie-backup-test-full.json')
 	eq(out.ok, true, `★ 导出到磁盘成功：${out.error || ''}`)
-	eq(out.userVisible, true, '落在用户能看到的目录')
+	eq(
+		out.userVisible,
+		false,
+		'没有公共目录时落在应用私有目录（界面上会提示用「分享」发出去）'
+	)
+	ok(
+		String(out.absPath).indexOf('_downloads') > 0 || String(out.absPath).indexOf('/downloads') > 0,
+		`私有兜底目录：${out.absPath}`
+	)
 	eq(
 		out.bytes,
 		Buffer.byteLength(built.text, 'utf8'),
