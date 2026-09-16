@@ -11,7 +11,13 @@
  * 的 exportAll/importAll，放在 backup.js 里就成循环依赖了。
  */
 import { exportAll, importAll } from './db.js'
-import { fullBackupEntries, parseFullBackup, summarizeFullBackup } from './fullbackup.js'
+import {
+	basename,
+	fullBackupEntries,
+	parseFullBackup,
+	PHOTO_DIR,
+	summarizeFullBackup,
+} from './fullbackup.js'
 import { zipChunks } from './zip.js'
 import { toBase64 } from './photo.js'
 import {
@@ -31,6 +37,60 @@ export function humanSize(bytes) {
 	if (n < 1024) return `${n} B`
 	if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`
 	return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 组装导出计划：backup.json 的文本 + 照片清单。
+ *
+ * 这是给 plus.io + plus.zip 那条链路用的 —— 只产出**文本**与**文件路径**，
+ * 不产出任何二进制，因为 JS 生成的字节在真机上根本写不进去。
+ *
+ * 记录里的照片路径会改写成 zip 内的相对路径（photos/xxx），
+ * 这样导出的 JSON 才是可移植的。
+ */
+export function buildExportPlan() {
+	const payload = exportAll()
+	const records = (payload.records || []).map((r) => {
+		if (!r || !r.photo) return r
+		const b = basename(r.photo)
+		return { ...r, photo: b ? PHOTO_DIR + b : '' }
+	})
+
+	const photos = []
+	const seen = new Set()
+	for (const r of payload.records || []) {
+		if (!r || !r.photo) continue
+		const b = basename(r.photo)
+		if (!b || seen.has(b)) continue
+		seen.add(b)
+		photos.push({ from: r.photo, name: b })
+	}
+
+	return {
+		jsonText: JSON.stringify({ ...payload, records }),
+		photos,
+		recordCount: records.length,
+	}
+}
+
+/**
+ * 从备份 payload 恢复：直接覆盖导入。
+ * 照片的写回与路径改写已经在 loadBackupFromFile 里做完了。
+ */
+export function applyRestoredBackup(payload) {
+	if (!payload || !Array.isArray(payload.records)) {
+		return { ok: false, error: '备份格式不正确' }
+	}
+	const res = importAll(payload, 'replace')
+	if (!res.ok) return { ok: false, error: res.error || '导入失败' }
+	return { ok: true, records: res.total }
+}
+
+/** 备份摘要（给确认弹窗用） */
+export function summarizePayload(payload) {
+	const records = (payload && payload.records) || []
+	const photos = records.filter((r) => r && r.photo).length
+	return { records: records.length, photos }
 }
 
 /**

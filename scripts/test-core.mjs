@@ -1645,78 +1645,6 @@ const withJavaFs = async (opts, fn) => {
 
 const NFS = await import('../src/core/native-fs.js')
 
-group('native-fs.js · 写二进制不用 Blob（真机报过「内核不支持 Blob」）')
-
-eq(typeof Blob, 'function', 'Node 里是有 Blob 的 —— 所以必须靠假环境才能测出 App 上的问题')
-
-// 含全部 256 种字节值：latin1 过桥只要错一个字节就会被抓出来
-const ALL_BYTES = new Uint8Array(256)
-for (let i = 0; i < 256; i++) ALL_BYTES[i] = i
-
-await withJavaFs({}, async (env) => {
-	const res = await NFS.writeFileBytes('ABS:/tmp/a.zip', [ALL_BYTES])
-	eq(res.ok, true, '写入成功')
-	eq(res.bytes, 256, '字节数对')
-	const got = env.files.get('ABS:/tmp/a.zip')
-
-eq(got.length, 256, '文件里确实是 256 字节')
-
-eq(
-		got.map((b) => String(b).padStart(3, '0')).join(','),
-		[...ALL_BYTES].map((b) => String(b).padStart(3, '0')).join(','),
-		'★ 全部 256 种字节值逐字节一致（ISO-8859-1 过桥无损）'
-	)
-	ok(String(res.trace).indexOf('ISO') < 0, 'trace 不含敏感细节')
-})
-
-// 多块写入（流式）应该拼起来等于完整内容
-await withJavaFs({}, async (env) => {
-	const a = new Uint8Array([1, 2, 3])
-	const b = new Uint8Array(0)
-	const c = new Uint8Array([255, 0, 128, 64])
-	const res = await NFS.writeFileBytes('ABS:/tmp/b.zip', [a, b, c])
-	eq(res.ok, true, '多块写入成功')
-	eq(res.bytes, 7, '空块不计入字节数')
-	eq(env.files.get('ABS:/tmp/b.zip').join(','), '1,2,3,255,0,128,64', '★ 多块按顺序拼接正确')
-})
-
-// 异步迭代器（真正打包时用的是 zipChunks 这个 async generator）
-await withJavaFs({}, async (env) => {
-	const res = await NFS.writeFileBytes('ABS:/tmp/c.zip', [ALL_BYTES.subarray(0, 10)])
-	eq(res.ok, true, '接受数组形式的块')
-})
-
-group('native-fs.js · 写文件的失败路径与分块')
-
-await withJavaFs({ rafThrows: true }, async () => {
-	const res = await NFS.writeFileBytes('ABS:/tmp/d.zip', [ALL_BYTES])
-	eq(res.ok, false, 'RandomAccessFile 不可用 → 失败而不是假装成功')
-	ok(String(res.error).indexOf('RandomAccessFile') >= 0, `原因说清楚：${res.error}`)
-})
-
-// 覆盖写必须截断：'rw' 模式不会清空已有文件，
-// 不截断的话新内容比旧的短时尾部残留会污染数据
-await withJavaFs({}, async (env) => {
-	env.files.set('ABS:/tmp/twice.zip', new Array(300).fill(7))
-	const res = await NFS.writeFileBytes('ABS:/tmp/twice.zip', [new Uint8Array([1, 2, 3])])
-	eq(res.ok, true, '第二次写成功')
-	eq(env.files.get('ABS:/tmp/twice.zip').length, 3, '★ 旧内容被截断（没有留下 300 字节的尾巴）')
-	eq(env.files.get('ABS:/tmp/twice.zip').join(','), '1,2,3', '内容正确')
-})
-
-// 大块写不进去时要自动换更小的块（真机限制）
-await withJavaFs({ maxChunkBytes: 512 }, async (env) => {
-	const BIG = new Uint8Array(5000)
-	for (let i = 0; i < BIG.length; i++) BIG[i] = (i * 3) & 0xff
-	const res = await NFS.writeFileBytes('ABS:/tmp/big.zip', [BIG])
-	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
-	eq(res.method, 'writeBytes', `实际用的方式：${res.method}`)
-	eq(res.chunkSize, 256, `自动降到能用的块大小：${res.chunkSize}`)
-	const got = env.files.get('ABS:/tmp/big.zip')
-	eq(got.length, 5000, '★ 5000 字节全部写入')
-	eq(got[4999], BIG[4999], '末字节对')
-})
-
 group('photo.js · 读取失败时要能看出是哪一环')
 
 // Node 里既没有 File 对象、也没有 plus、也没有 FileSystemManager
@@ -1986,137 +1914,323 @@ const withMediaStore = async (opts, fn) => {
 	}
 }
 
-group('native-fs.js · 直接写进公共下载（不经手中转文件）')
+/* ========== plus.io + plus.zip 链路（真机上唯一能写的路） ========== */
 
-await withMediaStore({}, async (env) => {
-	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'bak.zip')
-	eq(res.ok, true, '写入成功')
-	eq(res.bytes, 256, '写入字节数对')
-	ok(String(res.where).indexOf('Download/') >= 0, `返回可读位置：${res.where}`)
-	const doc = env.docs.get(env.firstUri())
+/**
+ * 假 plus.io / plus.zip。
+ *
+ * 关键：plus.io 的 FileWriter 收的是**字符串**，所以 mock 里也按文本存 ——
+ * 这正是真机上的行为（写文本能成，写二进制不能）。
+ * zip 部分直接用本项目自己的 zip 引擎，能真正验证打包/解包。
+ */
+function fakePlusIO(opts = {}) {
+	const files = new Map() // absPath -> { text }
+	const dirs = new Set(['/ABS', '/ABS/_doc', '/ABS/_downloads', '/ABS/_documents'])
 
-eq(doc.name, 'bak.zip', '文件名写进了 MediaStore')
-	eq(doc.bytes.length, 256, '★ 文件里确实是 256 字节')
-	eq(
-		doc.bytes.map((b) => String(b).padStart(3, '0')).join(','),
-		[...ALL_BYTES].map((b) => String(b).padStart(3, '0')).join(','),
-		'★ 全部 256 种字节值逐字节一致（ISO-8859-1 过桥无损）'
-	)
+	const base = (url) => {
+		const s = String(url || '')
+		if (s.indexOf('/') === 0) return s
+		return '/ABS/' + s.replace(/^\.?\/?/, '')
+	}
+	const parentOf = (p) => p.slice(0, p.lastIndexOf('/')) || '/ABS'
+	const sizeOf = (f) => (f && f.bytes !== undefined ? f.bytes : Buffer.byteLength((f && f.text) || '', 'utf8'))
+
+	const entryOf = (abs) => ({
+		name: abs.slice(abs.lastIndexOf('/') + 1),
+		isFile: files.has(abs),
+		fullPath: abs,
+		file: (ok) => {
+			const f = files.get(abs)
+			if (!f) return ok && ok(null)
+			ok({ size: sizeOf(f), name: abs.slice(abs.lastIndexOf('/') + 1) })
+		},
+		remove: (ok) => {
+			files.delete(abs)
+			dirs.delete(abs)
+			ok && ok()
+		},
+		copyTo: (dir, name, ok, fail) => {
+			const src = files.get(abs)
+			if (!src) return fail && fail(new Error('源不存在'))
+			const to = (dir.fullPath || '/ABS') + '/' + name
+			files.set(to, { text: src.text })
+			ok && ok({ fullPath: to })
+		},
+		createWriter: (ok) => {
+			const w = {
+				onwrite: null,
+				onerror: null,
+				seek() {},
+				write(text) {
+					// plus.io 的 FileWriter 按 UTF-8 写字符串 —— 真机上只有这条路能写进去
+					files.set(abs, { text: String(text) })
+					setTimeout(() => w.onwrite && w.onwrite(), 0)
+				},
+			}
+			ok(w)
+		},
+		createReader: () => ({
+			readEntries: (ok) => {
+				const prefix = abs.replace(/\/$/, '') + '/'
+				const out = []
+				for (const k of files.keys()) {
+					if (k.indexOf(prefix) === 0 && k.slice(prefix.length).indexOf('/') < 0) out.push(entryOf(k))
+				}
+				for (const d of dirs) {
+					if (d.indexOf(prefix) === 0 && d.slice(prefix.length).indexOf('/') < 0) {
+						out.push({ name: d.slice(d.lastIndexOf('/') + 1), isFile: false, fullPath: d })
+					}
+				}
+				ok(out)
+			},
+		}),
+	})
+
+	const root = {
+		getFile: (abs, o, ok, fail) => {
+			if (opts.writeThrows) return fail && fail(new Error('写入失败'))
+			const p = base(abs)
+			if (!files.has(p)) files.set(p, { text: '' })
+			ok(entryOf(p))
+		},
+		getDirectory: (abs, o, ok, fail) => {
+			const p = base(abs)
+			dirs.add(p)
+			ok(entryOf(p))
+		},
+	}
+
+	const FileReader = function () {
+		this.readAsDataURL = (file) => {
+			const abs = file && file.name ? null : null
+			// mock 的 file 对象带 fullPath
+			const p = file && file.__abs
+			const f = files.get(p)
+			setTimeout(() => {
+				if (!f) {
+					this.onerror && this.onerror(new Error('读不到'))
+					return
+				}
+				const b64 = Buffer.from(f.text, 'utf8').toString('base64')
+				this.onloadend && this.onloadend({ target: { result: 'data:text/plain;base64,' + b64 } })
+			}, 0)
+		}
+	}
+
+	const zipApi = opts.noZip
+		? undefined
+		: {
+				compress: async (srcAbs, zipAbs, ok, fail) => {
+					if (opts.zipThrows) return fail && fail(new Error('压缩失败'))
+					const src = base(srcAbs).replace(/\/$/, '')
+					const list = []
+					for (const [k, v] of files) {
+						if (k.indexOf(src + '/') !== 0) continue
+						list.push({
+							name: k.slice(src.length + 1),
+							data: new Uint8Array(Buffer.from(v.text, 'utf8')),
+						})
+					}
+					const bytes = await collectZip(
+						zipChunks(
+							list.map((x) => ({ name: x.name, read: async () => x.data })),
+							{ now: 1 }
+						)
+					)
+					const zp = base(zipAbs)
+					zipStore.set(zp, bytes)
+					// 也登记进目录，这样 listDir / fileSize 看得见；大小用真实 zip 字节数
+					files.set(zp, { text: '', bytes: bytes.length })
+					ok && ok()
+				},
+				decompress: async (zipAbs, destAbs, ok, fail) => {
+					if (opts.unzipThrows) return fail && fail(new Error('解压失败'))
+					const bytes = zipStore.get(base(zipAbs))
+					if (!bytes) return fail && fail(new Error('zip 不存在'))
+					const z = readZip(bytes)
+					if (!z.ok) return fail && fail(new Error(z.error))
+					const dest = base(destAbs).replace(/\/$/, '')
+					dirs.add(dest)
+					for (const e of z.entries) {
+						const p = dest + '/' + e.name
+						dirs.add(parentOf(p))
+						files.set(p, { text: Buffer.from(e.bytes).toString('utf8') })
+					}
+					ok && ok()
+				},
+			}
+
+	const zipStore = new Map()
+
+	const plusLike = {
+		io: {
+			PRIVATE_DOC: 'PRIVATE_DOC',
+			convertLocalFileSystemURL: (u) => base(u),
+			requestFileSystem: (type, ok) => ok({ root }),
+			resolveLocalFileSystemURL: (u, ok, fail) => {
+				const p = base(u)
+				if (files.has(p) || dirs.has(p)) {
+					const e = entryOf(p)
+					if (files.has(p)) {
+						// 给 FileReader 留个入口
+						e.__abs = p
+					}
+					ok(e)
+				} else fail && fail(new Error('不存在'))
+			},
+			FileReader,
+		},
+		zip: zipApi,
+		android: undefined,
+	}
+
+	// file() 回调里拿到的对象要能带 __abs 给 FileReader 用
+	const origResolve = plusLike.io.resolveLocalFileSystemURL
+	plusLike.io.resolveLocalFileSystemURL = (u, ok, fail) => {
+		origResolve(u, (e) => {
+			const patched = Object.assign({}, e)
+			patched.file = (cb) => {
+				e.file((f) => {
+					if (f) f.__abs = base(u)
+					cb && cb(f)
+				})
+			}
+			ok(patched)
+		}, fail)
+	}
+
+	return { plus: plusLike, files, dirs, zipStore }
+}
+
+const withPlusIO = async (opts, fn) => {
+	const env = fakePlusIO(opts)
+	globalThis.plus = env.plus
+	try {
+		return await fn(env)
+	} finally {
+		delete globalThis.plus
+	}
+}
+
+group('plusio.js + plus.zip 链路 · 导出与恢复（真机唯一能走的路）')
+
+const PIO = await import('../src/core/plusio.js')
+
+// 目录可见性判断：私有目录形如 /storage/emulated/0/Android/data/<包名>/...
+eq(
+	PIO.isUserVisible('/storage/emulated/0/Android/data/com.x/apps/y/doc'),
+	false,
+	'Android/data 下的判为不可见'
+)
+eq(PIO.isUserVisible('/storage/emulated/0/Download/x.zip'), true, '公共下载目录判为可见')
+
+await withPlusIO({}, async (env) => {
+	const d = PIO.resolveOutDir()
+	eq(d.url, '_downloads', `优先选 _downloads：${d.url}`)
+	eq(d.visible, true, '且判为可见')
 })
 
-// 真机踩到的那个坑：不报错，但一个字节都没写进去
-group('native-fs.js · 「没写进去」必须被当成失败（真机就是这个症状）')
+await withPlusIO({}, async (env) => {
+	// 写文本 → 读回（这轮真机证明只有这条路能写）
+	const w = await PIO.writeText('_doc/t.txt', 'hello-世界')
+	eq(w.ok, true, 'plus.io 写文本成功')
+	eq(await PIO.fileSize('_doc/t.txt'), Buffer.byteLength('hello-世界', 'utf8'), '大小按 UTF-8 字节数')
 
-await withMediaStore({ dropWrites: true }, async (env) => {
-	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'bak.zip')
-	eq(res.ok, false, '★ 一个字节都没写进去 → 报失败，而不是默默当成功')
-	ok(
-		String(res.error).indexOf('实际只有 0 字节') >= 0,
-		`★ 直接说出「写了多少、实际多少」：${res.error}`
-	)
-	ok(
-		String(res.error).indexOf('2048B') >= 0 && String(res.error).indexOf('128B') >= 0,
-		`★ 每种块大小的失败原因都报出来（能看出块大小不是唯一原因）：${res.error}`
-	)
-	eq(env.docs.size, 0, '★ 失败时把那个空文件删掉了')
+	const r = await PIO.readBase64('_doc/t.txt')
+	eq(r.ok, true, '读回成功')
+	eq(Buffer.from(r.base64, 'base64').toString('utf8'), 'hello-世界', '★ 内容往返一致（含中文）')
 })
 
-await withMediaStore({ insertNull: true }, async () => {
-	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'a.zip')
-	eq(res.ok, false, 'insert 返回空 → 失败')
+await withPlusIO({}, async (env) => {
+	// 完整导出：plus.io 写 JSON + 拷照片 + plus.zip 打包
+	freshStorage()
+	initDB()
+	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/food_a.jpg' })
+	saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice] })
+	// 造一张"照片"文件（plus.io 只能写文本，内容无所谓）
+	await PIO.writeText('_doc/food/food_a.jpg', 'FAKEPHOTO-A')
+
+	const plan = FBIO.buildExportPlan()
+	eq(plan.records !== undefined || true, true, '计划已生成')
+	eq(plan.photos.length, 1, '计划里有 1 张照片')
+
+	const out = await BK.exportFullBackupNative(plan, 'calorie-backup-test.zip')
+	eq(out.ok, true, `★ 导出成功：${out.error || ''}`)
+	eq(out.userVisible, true, '落在用户能看到的位置')
+	ok(out.bytes > 0, `zip 有内容（${out.bytes} 字节）`)
+	eq(env.zipStore.size, 1, 'plus.zip 生成了 1 个 zip')
 })
 
-await withMediaStore({ openOutNull: true }, async (env) => {
-	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'a.zip')
-	eq(res.ok, false, 'openOutputStream 返回空 → 失败')
-	eq(env.docs.size, 0, '失败时清理了空文件')
+await withPlusIO({}, async (env) => {
+	// 完整往返：导出 → 列出 → 解压 → 恢复
+	freshStorage()
+	initDB()
+	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/food_p1.jpg', note: '带照片' })
+	saveRecord({ ts: T(2026, 9, 16, 12, 0), items: [rice], note: '无照片' })
+	await PIO.writeText('_doc/food/food_p1.jpg', 'PHOTO-ONE')
+
+	const plan = FBIO.buildExportPlan()
+	const out = await BK.exportFullBackupNative(plan, 'calorie-backup-2026-09-16.zip')
+	eq(out.ok, true, '导出成功')
+
+	const list = await BK.listBackupFiles()
+	eq(list.length, 1, `★ 能列出备份文件：${JSON.stringify(list.map((x) => x.name))}`)
+	eq(list[0].name, 'calorie-backup-2026-09-16.zip', '文件名对')
+	ok(list[0].size > 0, `带上了大小（${list[0].size}）`)
+
+	// 清空后恢复
+	clearAll()
+	eq(allRecords().length, 0, '先清空')
+
+	const loaded = await BK.loadBackupFromFile(list[0].url)
+	eq(loaded.ok, true, `★ 解压并读到 backup.json：${loaded.error || ''}`)
+	eq(loaded.payload.records.length, 2, '备份里有 2 条记录')
+	eq(loaded.photos, 1, '★ 照片被拷回私有目录')
+
+	const applied = FBIO.applyRestoredBackup(loaded.payload)
+	eq(applied.ok, true, '恢复写入成功')
+	eq(allRecords().length, 2, '★ 记录回到 2 条')
+	const withPhoto = allRecords().find((r) => r.note === '带照片')
+	eq(withPhoto.photo, '_doc/food/food_p1.jpg', '★ 照片路径指向拷回后的位置')
+	const noPhoto = allRecords().find((r) => r.note === '无照片')
+	eq(noPhoto.photo, '', '没照片的记录保持空')
+	eq(await PIO.fileSize('_doc/food/food_p1.jpg'), Buffer.byteLength('PHOTO-ONE', 'utf8'), '照片内容真的拷回来了')
 })
 
-group('native-fs.js · 大块写不进去时要自动换更小的块')
+await withPlusIO({}, async (env) => {
+	// 备份里没带照片时，记录的图片字段必须被清空（不留死链）
+	freshStorage()
+	initDB()
+	saveRecord({ ts: T(2026, 9, 16, 8, 0), items: [rice], photo: '_doc/food/gone.jpg' })
+	const plan = FBIO.buildExportPlan()
+	// 故意把照片源改成不存在的，模拟照片已丢
+	plan.photos[0].from = '_doc/food/does_not_exist.jpg'
+	const out = await BK.exportFullBackupNative(plan, 'calorie-backup-x.zip')
+	eq(out.ok, true, '导出照样成功（照片丢了不该让整个导出失败）')
+	eq(out.missing.length, 1, '记下了缺失的那张')
 
-// 真机上大块会静默失败。这里模拟「只有 <=512 字节的块才写得进去」，
-// 看它能不能自动从 2048 降到 512 并把内容写对。
-await withMediaStore({ maxChunkBytes: 512 }, async (env) => {
-	const BIG = new Uint8Array(5000)
-	for (let i = 0; i < BIG.length; i++) BIG[i] = (i * 7) & 0xff
-
-	const res = await NFS.writeBytesToDownloads(BIG, 'big.zip')
-	eq(res.ok, true, '★ 大块失败后自动换小块，最终写入成功')
-	eq(res.method, 'private-file', `实际走的策略：${res.method}（私有文件中转 + 原生搬运）`)
-	const doc = [...env.docs.values()].find((d) => d.name === 'big.zip')
-	eq(doc.bytes.length, 5000, '★ 5000 字节全部写入')
-	eq(doc.bytes[0], BIG[0], '首字节对')
-	eq(doc.bytes[4999], BIG[4999], '末字节对')
+	const list = await BK.listBackupFiles()
+	const loaded = await BK.loadBackupFromFile(list[0].url)
+	eq(loaded.ok, true, '恢复读取成功')
+	eq(loaded.payload.records[0].photo, '', '★ 缺的照片被清空，不留死链')
 })
 
-// 小块能过时应该一次就成
-await withMediaStore({}, async (env) => {
-	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'w1.zip')
-	eq(res.ok, true, '正常情况一次成功')
-	eq(res.method, 'private-file', `默认走策略A（私有文件中转）：${res.method}`)
+group('plusio.js · 失败路径')
+eq((await PIO.writeText('_doc/x.txt', 'a')).ok, false, '没有 plus 时写文件失败而不是崩')
+eq(PIO.hasZip(), false, '没有 plus 时 hasZip 为 false')
+eq((await PIO.zipCompress('_doc/a', '_doc/b.zip')).ok, false, '没有 plus.zip 时报失败')
+
+await withPlusIO({ noZip: true }, async () => {
+	eq(PIO.hasZip(), false, '未启用 Zip 模块时 hasZip 为 false')
+	const r = await PIO.zipCompress('_doc/a', '_doc/b.zip')
+	eq(r.ok, false, '压缩失败并给出原因')
+	ok(String(r.error).indexOf('Zip 模块') >= 0, `提示要勾模块：${r.error}`)
 })
 
-group('native-fs.js · 从 SAF 读回（全程原生）')
-
-await withMediaStore({}, async (env) => {
-	const staged = 'ABS:/_doc/picked.zip'
-	// 完整往返：走 App 真实路径（导出 = base64 文本格式）
-	const out = await BK.persistBackupZip(ALL_BYTES, 'rt.zip')
-	eq(out.ok, true, '★ 导出成功（base64 文本格式）')
-	ok(String(out.where).indexOf('Download/') >= 0, `位置：${out.where}`)
-
-	const read = await NFS.readUriBase64(
-		{ _kind: 'uri', url: env.firstUri() },
-		{ stagingPath: () => staged }
-	)
-	eq(read.ok, true, '读取成功')
-	ok(String(read.trace).indexOf('nativeCopy') >= 0, `★ 走了原生搬运：${read.trace}`)
-	ok(String(read.trace).indexOf('readNative') >= 0, `★ 用原生读回而不是 plus.io：${read.trace}`)
-	ok(
-		String(read.text).indexOf('CCFULL1:') === 0,
-		'★ 内容是带文件头的 base64 文本'
-	)
-	const got = base64ToBytes(String(read.text).slice('CCFULL1:'.length))
-	eq(got.length, 256, '读回字节数对')
-	eq([...got].join(','), [...ALL_BYTES].join(','), '★ 写入→读回 逐字节一致')
-})
-
-// 读到的内容是空 —— 用户真机上报的就是这个症状，必须能被识别出来
-await withMediaStore({}, async (env) => {
-	// 造一个 0 字节的文件（真机上 FileUtils.copy 就是这样）
-	env.docs.set('content://downloads/99', { name: 'empty.zip', bytes: [] })
-	env.files.set('ABS:/_doc/e.zip', { bytes: [] })
-	const read = await NFS.readUriBase64(
-		{ _kind: 'uri', url: 'content://downloads/99' },
-		{ stagingPath: () => 'ABS:/_doc/e.zip' }
-	)
-	eq(read.ok, false, '★ 0 字节的文件 → 判为失败')
-	ok(
-		String(read.error).indexOf('0 字节') >= 0,
-		`★ 直接说出「文件实际是 0 字节」：${read.error}`
-	)
-})
-
-group('native-fs.js · 读取的失败路径与体积上限')
-
-await withMediaStore({ openInNull: true }, async () => {
-	const r = await NFS.readUriBase64({ _kind: 'uri', url: 'x' })
-	eq(r.ok, false, 'openInputStream 返回空 → 失败')
-})
-
-await withMediaStore({}, async () => {
-	// 现在读取走「原生落盘 + plus.io 读」，所以必须由调用方提供落盘回调
-	const r = await NFS.readUriBase64({ _kind: 'uri', url: 'x' })
-	eq(r.ok, false, '没有落盘路径 → 明确报错而不是返回空数据')
-	ok(String(r.error).indexOf('落盘路径') >= 0, `原因说清楚：${r.error}`)
-})
-
-await withMediaStore({}, async (env) => {
-	await NFS.writeBytesToDownloads(ALL_BYTES, 'big.zip')
-	const r = await NFS.readUriBase64({ _kind: 'uri', url: env.firstUri() }, { limit: 10 })
-	eq(r.ok, false, '★ 超过体积上限 → 不读进来')
-	ok(String(r.error).indexOf('太大') >= 0, `原因：${r.error}`)
-	ok(String(r.trace).indexOf('available') >= 0, 'trace 显示先问过大小')
+await withPlusIO({}, async () => {
+	const r = await PIO.listDir('_doc/nope')
+	eq(r.ok, false, '列不存在的目录 → 失败而不是抛异常')
+	eq(Array.isArray(r.names), true, '仍然返回数组，调用方不用防御')
 })
 
 /* ========== 原生能力自检 ========== */

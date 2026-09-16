@@ -5,17 +5,23 @@
  */
 import { todayKey } from './date.js'
 import { hasStorage, readRaw, writeRaw, removeRaw } from './storage.js'
-import { base64ToBytes, bytesToBase64 } from './zip.js'
+import { base64ToBytes } from './zip.js'
+import { _internal as fbutf8 } from './fullbackup.js'
 import {
-	copyPrivateFileToDownloads,
-	writeBytesToDownloads,
-	removePrivateFile,
-	pickFileBytes,
-	absPathOf,
-	hasPlus,
-	writeTextFileNative,
-} from './native-fs.js'
-import { toBase64 } from './photo.js'
+	absOf,
+	copyFile,
+	fileSize,
+	findBackups,
+	hasPlusIo,
+	listDir,
+	mkdir,
+	readBase64,
+	remove,
+	resolveOutDir,
+	writeText,
+	zipCompress,
+	zipDecompress,
+} from './plusio.js'
 
 export function backupFileName() {
 	return `calorie-backup-${todayKey()}.json`
@@ -251,44 +257,188 @@ export function writeBackupFile(json, filename = backupFileName()) {
 export const FULL_BACKUP_MAX_BYTES = 120 * 1024 * 1024
 
 /**
- * 备份文件的文本格式头。App 端的备份文件内容是 **base64 文本**（ASCII），
- * 而不是二进制 —— 因为真机上带 Charset 参数的 readString 返回空，
- * 而 1 参 readString 是 UTF-8，只有 ASCII 文本两边都能读。
- * 带这个头，导入时一眼认出来并解码。
+ * 导出完整备份（App 端）。
+ *
+ * 重做原因：真机自检证明 **Native.js 的写入全部失败**（writeBytes、
+ * writeString、Files.copy、MediaStore 输出流都是「不报错但 0 字节」），
+ * 唯一能真正写进去的是 plus.io 的 FileWriter.write(String)。
+ *
+ * 所以整条链只用 plus.io + plus.zip，**JS 生成的字节一次都不过桥**：
+ *   1. 建临时目录，把 backup.json（文本）用 plus.io 写进去
+ *   2. 照片用 entry.copyTo 原生拷进同一目录（字节不过 JS）
+ *   3. plus.zip.compress 打成一个 zip（纯原生）
+ *   4. 输出目录优先挑「用户在文件管理器里看得到」的那个
+ *
+ * @param {object} plan  { jsonText, photos:[{from, name}] }  由调用方准备
  */
-export const FULL_BACKUP_TEXT_MARK = 'CCFULL1:'
+export async function exportFullBackupNative(plan, filename) {
+	const outDir = resolveOutDir()
+	const work = '_doc/ccexport'
+	const zipLocal = `${outDir.url}/${filename}`
 
-/** 把完整备份交给用户：H5 浏览器下载二进制 zip / App 写 base64 文本进「下载」 */
-export async function persistBackupZip(bytes, filename) {
-	const isH5 = typeof document !== 'undefined' && typeof Blob !== 'undefined'
+	// 1. 清掉上次的临时目录，建新的
+	await remove(work)
+	const made = await mkdir(work)
+	if (!made.ok) return { ok: false, error: made.error }
 
-	if (hasPlus()) {
-		// App：base64 文本 → 原生写私有文件 → Files.copy 推进下载目录
-		const text = FULL_BACKUP_TEXT_MARK + bytesToBase64(bytes)
-		const localUrl = `_doc/out-${Date.now()}.zip`
-		const abs = absPathOf(localUrl)
-
-		const wrote = await writeTextFileNative(abs, text)
-		if (wrote.ok) {
-			const copied = await copyPrivateFileToDownloads(abs, filename, 'application/zip', text.length)
-			removePrivateFile(localUrl)
-			if (copied.ok) return { ok: true, mode: 'downloads', where: copied.where, bytes: bytes.length }
-			if (copied.kept) {
-				return { ok: false, error: `策略A: ${copied.error}（文件已保留，请到下载目录看一眼）`, trace: copied.trace }
-			}
-		}
-
-		// 退回老路径：二进制直接写 MediaStore 输出流
-		const fallback = await writeBytesToDownloads(bytes, filename)
-		if (fallback.ok) return { ok: true, mode: 'downloads', where: fallback.where, bytes: bytes.length }
-		return {
-			ok: false,
-			error: `文本写: ${wrote.ok ? 'ok' : wrote.error}  ｜  二进制写: ${fallback.error}`,
-			trace: '',
-		}
+	// 2. 写 backup.json（文本，plus.io 能写）
+	const wrote = await writeText(`${work}/backup.json`, plan.jsonText)
+	if (!wrote.ok) {
+		await remove(work)
+		return { ok: false, error: '写 backup.json 失败：' + wrote.error }
+	}
+	// 比字节数：plus.io 按 UTF-8 写，中文一个字符占 3 字节，
+	// 拿字符数去比会误判（记录里有中文菜名，必然不等）
+	const expectBytes = fbutf8.utf8Bytes(plan.jsonText).length
+	const sizeCheck = await fileSize(`${work}/backup.json`)
+	if (sizeCheck !== expectBytes) {
+		await remove(work)
+		return { ok: false, error: `backup.json 写进去 ${sizeCheck} 字节，期望 ${expectBytes}` }
 	}
 
-	// H5：浏览器下载（保持二进制 zip，别的解压工具能直接打开）
+	// 3. 拷照片（plus.io 原生拷贝）
+	const photoDir = `${work}/photos`
+	if (plan.photos.length) {
+		const pd = await mkdir(photoDir)
+		if (!pd.ok) {
+			await remove(work)
+			return { ok: false, error: '建照片目录失败：' + pd.error }
+		}
+	}
+	let copied = 0
+	const missed = []
+	for (const ph of plan.photos) {
+		const c = await copyFile(ph.from, `${photoDir}/${ph.name}`)
+		if (c.ok) copied++
+		else missed.push(ph.name)
+	}
+
+	// 4. 打包（plus.zip 原生压缩）
+	const zipped = await zipCompress(work, zipLocal)
+	if (!zipped.ok) {
+		await remove(work)
+		return { ok: false, error: zipped.error }
+	}
+	const zipSize = await fileSize(zipLocal)
+	await remove(work)
+
+	if (!(zipSize > 0)) {
+		return { ok: false, error: `生成的 zip 大小异常（${zipSize} 字节）` }
+	}
+
+	return {
+		ok: true,
+		where: zipLocal,
+		absPath: absOf(zipLocal),
+		userVisible: outDir.visible,
+		bytes: zipSize,
+		photos: copied,
+		missing: missed,
+		dirLabel: outDir.label,
+	}
+}
+
+/**
+ * 列出可供恢复的备份文件（扫描下载 / 文档 / 私有目录）。
+ * 不走系统文件选择器：SAF 选来的 content:// 在真机上读不出来
+ * （plus.io 读不了 content://，Native.js 读取也失败）。
+ */
+export async function listBackupFiles() {
+	const list = await findBackups('calorie-backup')
+	// 附带大小，方便用户辨认
+	const out = []
+	for (const f of list) {
+		const size = await fileSize(f.url)
+		out.push({ ...f, size })
+	}
+	return out.sort((a, b) => String(b.name).localeCompare(String(a.name)))
+}
+
+/**
+ * 从指定的备份文件恢复：原生解压 → 读 backup.json → 把照片拷回私有目录。
+ * @returns {Promise<{ok:boolean, payload?:object, photos?:number, error?:string}>}
+ */
+export async function loadBackupFromFile(fileUrl) {
+	const work = '_doc/ccrestore'
+	await remove(work)
+	const made = await mkdir(work)
+	if (!made.ok) return { ok: false, error: made.error }
+
+	const un = await zipDecompress(fileUrl, work)
+	if (!un.ok) {
+		await remove(work)
+		return { ok: false, error: un.error }
+	}
+
+	// backup.json 可能在根，也可能在压缩时带了一层目录里
+	let jsonUrl = `${work}/backup.json`
+	let text = await readBase64Text(jsonUrl)
+	if (!text.ok) {
+		const sub = await listDir(work)
+		const dir = sub.ok ? sub.names.find((x) => !x.isFile) : null
+		if (dir) {
+			jsonUrl = `${dir.url}/backup.json`
+			text = await readBase64Text(jsonUrl)
+		}
+	}
+	if (!text.ok) {
+		await remove(work)
+		return { ok: false, error: '备份里找不到 backup.json（' + text.error + '）' }
+	}
+
+	let payload = null
+	try {
+		payload = JSON.parse(text.text)
+	} catch (e) {
+		await remove(work)
+		return { ok: false, error: 'backup.json 解析失败' }
+	}
+	if (!payload || !Array.isArray(payload.records)) {
+		await remove(work)
+		return { ok: false, error: '备份格式不正确：缺少 records' }
+	}
+
+	// 照片：从解压目录拷回 _doc/food/，并把记录里的路径改成新位置
+	const base = jsonUrl.slice(0, jsonUrl.lastIndexOf('/'))
+	const photoDir = `${base}/photos`
+	const dirList = await listDir(photoDir)
+	const names = dirList.ok ? dirList.names.filter((x) => x.isFile).map((x) => x.name) : []
+	const have = new Set(names)
+
+	let photos = 0
+	const records = payload.records.map((r) => {
+		if (!r || !r.photo) return r
+		const p = String(r.photo)
+		const n = p.indexOf('photos/') === 0 ? p.slice(7) : p.slice(p.lastIndexOf('/') + 1)
+		if (!n || !have.has(n)) {
+			// 备份里没带这张 → 清空，别留死链
+			return { ...r, photo: '' }
+		}
+		return { ...r, photo: `_doc/food/${n}` }
+	})
+
+	// 真正拷照片（异步逐个来）
+	for (const n of names) {
+		const c = await copyFile(`${photoDir}/${n}`, `_doc/food/${n}`)
+		if (c.ok) photos++
+	}
+
+	await remove(work)
+	return { ok: true, payload: { ...payload, records }, photos, total: names.length }
+}
+
+/** 读取一个文本文件（走 plus.io 读 base64 再解码成 UTF-8 文本） */
+async function readBase64Text(localUrl) {
+	const r = await readBase64(localUrl)
+	if (!r.ok) return { ok: false, error: r.error }
+	return { ok: true, text: fbutf8.utf8Decode(base64ToBytes(r.base64)) }
+}
+
+
+/** 把完整备份交给用户：H5 浏览器下载二进制 zip / App 走原生链路 */
+export async function persistBackupZip(bytes, filename, plan) {
+	const isH5 = typeof document !== 'undefined' && typeof Blob !== 'undefined'
+	if (hasPlusIo() && plan) return exportFullBackupNative(plan, filename)
 	if (isH5) {
 		try {
 			const blob = new Blob([bytes], { type: 'application/zip' })
@@ -303,10 +453,8 @@ export async function persistBackupZip(bytes, filename) {
 			return { ok: false, error: '浏览器下载失败' }
 		}
 	}
-
 	return { ok: false, error: '当前环境不支持保存文件' }
-}
-/** H5：用 <input type=file> 选一个 zip 并读成字节 */
+}/** H5：用 <input type=file> 选一个 zip 并读成字节 */
 function pickZipOnH5() {
 	return new Promise((resolve) => {
 		try {
@@ -343,73 +491,15 @@ function pickZipOnH5() {
 }
 
 /**
- * 让用户选一个完整备份文件并读成字节。
- * H5 走 <input type=file>；App 走 SAF，先落私有临时文件再用 plus.io 读。
+ * H5 端选一个备份文件（浏览器 input）并读成二进制 zip。
+ *
+ * App 端不走这里 —— 真机上 SAF 选来的 content:// 读不出来
+ * （plus.io 读不了 content://，Native.js 读取也失效），
+ * 所以 App 改成扫描「下载 / 文档」目录，见 listBackupFiles。
  */
 export async function pickZipFile() {
-	const isH5 = typeof document !== 'undefined'
-
-	if (isH5) {
-		const picked = await pickZipOnH5()
-		if (!picked.ok || !picked.bytes) return picked
-		return { ...picked, bytes: decodePickedBytes(picked.bytes) }
+	if (typeof document === 'undefined') {
+		return { ok: false, unsupported: true, error: 'App 端请用「从文件恢复」扫描目录' }
 	}
-
-	// App：选文件 → 原生落盘 → 原生读文本 → 解码
-	const name = `picked-${Date.now()}.zip`
-	const localUrl = `_doc/${name}`
-
-	const picked = await pickFileBytes({
-		limit: FULL_BACKUP_MAX_BYTES,
-		stagingPath: () => absPathOf(localUrl),
-		readViaPlus: () => toBase64(localUrl, null),
-	})
-
-	removePrivateFile(localUrl)
-
-	if (!picked.ok) {
-		if (picked.cancelled) return picked
-		return {
-			ok: false,
-			error: picked.error || '读取所选文件失败',
-			trace: [picked.trace, picked.inner].filter(Boolean).join('  ｜  '),
-		}
-	}
-	if (!picked.text) return { ok: false, error: '读到的内容是空的', trace: picked.trace }
-
-	return {
-		ok: true,
-		bytes: decodePickedBytes(picked.text, picked.asBase64),
-		trace: picked.trace,
-	}
+	return pickZipOnH5()
 }
-
-/**
- * 把读到的内容解码成 zip 字节。
- * 兼容三种来源：
- *   App 文本备份（CCFULL1: 开头）  → base64 解码
- *   plus.io 兜底读到的 base64     → 直接解码
- *   H5 的二进制 zip                → 原样
- */
-function decodePickedBytes(content, asBase64) {
-	// 只有字符串才需要解码；二进制直接原样（避免把字节数组 String() 成逗号串）
-	if (typeof content === 'string') {
-		const t = content
-		if (t.indexOf(FULL_BACKUP_TEXT_MARK) === 0) {
-			return base64ToBytes(t.slice(FULL_BACKUP_TEXT_MARK.length))
-		}
-		if (asBase64) return base64ToBytes(t)
-		return latin1BytesOf(t)
-	}
-	return content
-}
-
-/** ISO-8859-1 字符串 → 字节（每码点低 8 位） */
-function latin1BytesOf(text) {
-	const out = new Uint8Array(text.length)
-	for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff
-	return out
-}/** 把照片字节写进 App 私有目录（恢复备份时用）
- *  —— 实现挪到 native-fs.js，二进制写入逻辑集中在一处
- */
-export { writePhotoFile } from './native-fs.js'
