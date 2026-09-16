@@ -1927,17 +1927,20 @@ function fakeMediaStore(opts = {}) {
 				if (opts.readStringThrows) throw new Error('Files.readString 不可用')
 				const box = files.get(p && p.path)
 				if (!box) throw new Error('文件不存在')
-				let out = ''
-				for (let i = 0; i < box.bytes.length; i++) out += String.fromCharCode(box.bytes[i])
-				return out
+				return Buffer.from(Uint8Array.from(box.bytes)).toString('utf8')
+			},
+			// writeString/readString 按真实 UTF-8 语义（中文一字符 3 字节）
+			writeString: (p, text) => {
+				if (opts.writeStringThrows) throw new Error('Files.writeString 不可用')
+				const bytes = [...Buffer.from(String(text), 'utf8')]
+				files.set(p && p.path, { bytes })
+				return p
 			},
 			readAllLines: (p) => {
 				if (opts.readAllLinesThrows) throw new Error('Files.readAllLines 不可用')
 				const box = files.get(p && p.path)
 				if (!box) throw new Error('文件不存在')
-				let out = ''
-				for (let i = 0; i < box.bytes.length; i++) out += String.fromCharCode(box.bytes[i])
-				return [out]
+				return [Buffer.from(Uint8Array.from(box.bytes)).toString('utf8')]
 			},
 			size: (p) => {
 				const box = files.get(p && p.path)
@@ -2115,6 +2118,77 @@ await withMediaStore({}, async (env) => {
 	ok(String(r.error).indexOf('太大') >= 0, `原因：${r.error}`)
 	ok(String(r.trace).indexOf('available') >= 0, 'trace 显示先问过大小')
 })
+
+/* ========== 原生能力自检 ========== */
+
+const ST = await import('../src/core/selftest.js')
+
+group('selftest.js · 自检要能报出真话')
+
+// Node / H5 环境：应老实报「非 Android」，而不是崩
+const st1 = await ST.runSelfTest()
+ok(Array.isArray(st1.rows) && st1.rows.length > 0, '产出报告行')
+ok(st1.text.indexOf('原生能力自检') >= 0, '报告有标题')
+eq(st1.rows[0].ok, false, '非 Android 环境下第一条就报不通')
+ok(st1.text.indexOf('不通') >= 0, '报告里出现「不通」')
+
+// 假 Android 环境：全部探针都要跑完，而且刻意弄坏哪些，就得报出哪些
+await withMediaStore(
+	{ rafThrows: true, readStringThrows: true, readAllLinesThrows: true },
+	async () => {
+		const st2 = await ST.runSelfTest()
+		const byName = (n) => st2.rows.find((x) => x.name.indexOf(n) >= 0)
+
+		ok(!!byName('运行环境'), '有「运行环境」这条')
+		eq(byName('运行环境').ok, true, '假 Android 环境被认出来')
+		ok(String(byName('运行环境').detail).indexOf('API 36') >= 0, `读到 API 级别：${byName('运行环境').detail}`)
+
+		// ★ 自检的价值就在这里：刻意弄坏的项，必须报不通
+		eq(byName('RandomAccessFile.writeBytes').ok, false, '★ 弄坏 writeBytes → 自检报不通')
+		eq(byName('readString').ok, false, '★ 弄坏 readString → 自检报不通')
+		eq(byName('readAllLines').ok, false, '★ 弄坏 readAllLines → 自检报不通')
+
+		// 没弄坏的项应当通过
+		eq(byName('Native.js 基本调用').ok, true, '基本调用通过')
+		eq(byName('导入 java.nio.file.Files').ok, true, 'Files 可导入')
+
+		ok(
+			st2.text.indexOf('RandomAccessFile.writeBytes') >= 0,
+			'报告里列出了具体项名，便于对照'
+		)
+		ok(
+			/\d+ 项不通/.test(st2.text),
+			`报告末尾汇总了几项不通：${st2.text.split(String.fromCharCode(10)).pop()}`
+		)
+	}
+)
+
+// 功能完好的环境：文件相关的核心探针都该通过
+await withMediaStore({}, async () => {
+	const st3 = await ST.runSelfTest()
+	const byName = (n) => st3.rows.find((x) => x.name.indexOf(n) >= 0)
+	eq(byName('RandomAccessFile.writeBytes').ok, true, 'writeBytes 探针通过')
+	eq(byName('Files.writeString → readString(1参)').ok, true, '★ 核心往返探针通过')
+	eq(byName('Files.readAllLines(1参)').ok, true, 'readAllLines 探针通过')
+	eq(byName('Files.copy(Path, Path)').ok, true, 'Files.copy 探针通过')
+	const bad = st3.rows.filter((r) => r.ok === false).map((r) => r.name)
+	ok(
+		bad.every((n) => n.indexOf('plus.io') >= 0 || n.indexOf('plus.zip') >= 0),
+		`不通的只剩 mock 没提供的 plus.io / plus.zip：${bad.join('、') || '无'}`
+	)
+})
+
+group('selftest.js · 报告格式')
+const rows = [
+	{ name: 'A', ok: true, detail: '好的' },
+	{ name: 'B', ok: false, detail: '坏的' },
+	{ name: 'C', ok: null, detail: '' },
+]
+const txt = ST.reportOf(rows)
+ok(txt.indexOf('[通过] A — 好的') >= 0, '通过的项有标记与说明')
+ok(txt.indexOf('[不通] B — 坏的') >= 0, '不通的项有标记与说明')
+ok(txt.indexOf('[跳过] C') >= 0, '跳过的项有标记')
+ok(txt.indexOf('1 项不通：B') >= 0, '末尾汇总不通的项名')
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

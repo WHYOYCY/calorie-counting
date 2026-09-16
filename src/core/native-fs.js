@@ -66,7 +66,7 @@ export function probe() {
  * 优先 plus.android.invoke（显式反射，不依赖方法是否挂在代理上），
  * 没有该 API 时退回直接点调用。二选一，不会重复调用。
  */
-function callJava(obj, name) {
+export function callJava(obj, name) {
 	const args = Array.prototype.slice.call(arguments, 2)
 	const A = plus.android
 	if (A && typeof A.invoke === 'function') {
@@ -82,7 +82,7 @@ function callJava(obj, name) {
 }
 
 /** 读静态字段（部分基座上类代理取不到静态字段，退回 getAttribute） */
-function staticField(cls, name) {
+export function staticField(cls, name) {
 	try {
 		const v = cls[name]
 		if (v !== undefined && v !== null) return v
@@ -174,13 +174,13 @@ function bytesToLatin1(bytes) {
  * 绝对路径 → java.nio.file.Path。
  * 不用 Paths.get（那是可变参数，过桥不可靠），走 File.toPath() 更稳。
  */
-function pathOf(absPath) {
+export function pathOf(absPath) {
 	const File = plus.android.importClass('java.io.File')
 	if (!File) throw new Error('importClass 返回空（java.io.File）')
 	return callJava(new File(absPath), 'toPath')
 }
 
-function filesClass() {
+export function filesClass() {
 	const Files = plus.android.importClass('java.nio.file.Files')
 	if (!Files) throw new Error('importClass 返回空（java.nio.file，需 API 26+）')
 	return Files
@@ -622,11 +622,14 @@ export async function writeTextFileNative(absPath, text) {
 		}
 
 		trace.push('verify')
+		// 比的是字节数：Files.writeString 按 UTF-8 写，中文一个字符占 3 字节，
+		// 拿字符数去比会误判
+		const expect = utf8Bytes(text).length
 		const got = Number(callJava(Files, 'size', pathOf(absPath)))
-		if (isFinite(got) && got !== String(text).length) {
-			throw new Error(`写了 ${text.length} 字符，文件实际只有 ${got} 字节`)
+		if (isFinite(got) && got !== expect) {
+			throw new Error(`写了 ${expect} 字节，文件实际只有 ${got} 字节`)
 		}
-		return { ok: true, bytes: String(text).length, method: ok ? 'writeString' : 'writeBytes', trace: trace.join(' → ') }
+		return { ok: true, bytes: expect, method: ok ? 'writeString' : 'writeBytes', trace: trace.join(' → ') }
 	} catch (e) {
 		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
 	}

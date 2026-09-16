@@ -78,7 +78,7 @@ npm run test:core # 只跑核心逻辑单元测试
    `plus.android.importClass()` **不会在当前作用域创建同名绑定**，
    不接收返回值就等于没导入，真机会报「Xxx is not defined」。
    这类错误单元测试永远抓不到：测试里的假 plus 是手写的，类永远存在。
-3. **核心逻辑单元测试**（415 项断言）—— 日期与餐次归类、营养换算、
+3. **核心逻辑单元测试**（438 项断言）—— 日期与餐次归类、营养换算、
    数据层增删改查与迁移、统计聚合、DashScope 请求契约。
 
 核心逻辑（`src/core/`）不依赖 uni 运行时，靠运行时特性探测解耦，
@@ -111,6 +111,7 @@ src/
 │   ├── fullbackup.js      # 完整备份的打包/解包与路径改写（纯逻辑）
 │   ├── fullbackup-io.js   # 完整备份的导出/恢复编排
 │   ├── backup.js          # 本机快照、剪贴板、备份落盘
+│   ├── selftest.js        # 原生能力自检（真机上哪条路能用）
 │   └── native-fs.js       # App 原生原语（MediaStore / SAF / 私有文件）
 ├── pages/
 │   ├── index/index.vue        # 记录：今日汇总 + 餐次列表 + 悬浮操作
@@ -175,12 +176,28 @@ scripts/
 - **备份里没带的照片，导入时会把记录的图片字段清空**。留一个永远显示不
   出来的路径比没有更糟 —— 界面上一片空白还不告诉你为什么。
 - 编辑页对读不出来的照片会明确显示「照片已丢失」，而不是默默留白。
-- **写文件不用 Blob**。uni-app App 端的页面 JS 跑在逻辑层 JS 引擎里，
-  不是浏览器环境 —— 没有 `document` / `window` / `Blob`
-  （真机报「当前内核不支持 Blob」就是这个原因），所以
-  `plus.io` 的 `FileWriter.write(Blob)` 在 App 上走不通。
-  改用 Native.js 的 `FileOutputStream`，二进制则编成 ISO-8859-1
-  字符串再过 `getBytes`（U+0000~U+00FF 与字节一一映射，往返无损）。
+
+### Native.js 的坑（真机踩出来的）
+
+这个项目的备份链路要在 App 的**逻辑层 JS 引擎**里调原生 API。
+uni-app 的 App 端不是浏览器环境（没有 `document` / `window` / `Blob`），
+而且 Native.js 有不少操作是**不报错但什么都不做**的。
+下面每一条都是真机报错后查出来或试出来的，列在这里免得重踩：
+
+| 现象 | 原因 | 现在的做法 |
+| --- | --- | --- |
+| `当前内核不支持 Blob` | App 逻辑层没有 `Blob`，`plus.io` 的 `FileWriter.write(Blob)` 走不通 | 不用 Blob |
+| `resolver.insert is not a function` | 从 Java 返回的实例，方法不一定挂在 JS 代理上 | `importClass` + `plus.android.invoke` 反射调用 |
+| `Xxx is not defined` | `importClass()` **不会创建同名绑定**，不接收返回值就等于没导入 | 一律 `const X = importClass(...)`；有静态检查兵底 |
+| 写入不报错但文件是 0 字节 | `byte[]` 过桥不可靠（`OutputStream.write(byte[])`、`FileUtils.copy`、`readAllBytes` → `encodeToString` 都栽过）；Native.js 传参也有长度限制 | 字节不过桥：只用字符串（`writeBytes(String)` / `writeString` / `readString`），并用 `Files.copy` 在原生侧搬运 |
+| 备份文件内容是 base64 文本 | 1 参 `Files.readString` 是 UTF-8，读不了二进制；带 Charset 参数的那个版本返回空 | App 端备份存 base64 文本（带 `CCFULL1:` 头）；H5 仍为二进制 zip |
+| Java 写进去的文件 `plus.io` 读不出来 | 两条文件层不互通 | 写和读走同一条路；plus.io 只当备选 |
+| 写入「成功」但是空的 | 写完不核对就不知道 | 每次写完都回查实际大小（`Files.size` / `MediaColumns.SIZE` / `File.length`），对不上就换策略重试 |
+
+因为这一类问题看代码和单测都发现不了（测试里的假环境一切都是好的），
+应用里内置了一个**原生能力自检**（我的 → 关于 → 原生能力自检），
+把备份链路依赖的底层操作逐个跑一遍并输出报告，
+哪条不通会直接说明报什么错。
 
 ### 为什么导出要走系统能力
 

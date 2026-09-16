@@ -200,6 +200,27 @@
 			<text class="hint t-xs t-mute">
 				本应用不含任何统计上报。识别结果由大模型估算，仅供记录参考，不构成医疗或营养建议。
 			</text>
+			<!-- 原生能力自检：真机上 Native.js 有些操作会静默失效，让设备自己报 -->
+			<view class="btn btn-plain self-test-btn" @click="doSelfTest">原生能力自检</view>
+		</view>
+	</view>
+
+	<!-- 自检报告弹层 -->
+	<view v-if="testing2" class="mask" @click="testing2 = false">
+		<view class="dialog" @click.stop>
+			<text class="dialog-title">原生能力自检</text>
+			<text class="hint t-xs t-mute">
+				把备份链路依赖的底层操作逐个跑一遍。哪条不通会直接说明报什么错，
+				方便定位真机上「不报错但什么都不做」的问题。
+			</text>
+			<scroll-view class="report" scroll-y>
+				<text class="report-t">{{ testReport }}</text>
+			</scroll-view>
+			<view class="row-btns">
+				<view class="btn btn-plain grow" @click="testing2 = false">关闭</view>
+				<view class="btn btn-ghost grow" @click="copyReport">复制报告</view>
+				<view class="btn btn-primary grow" @click="doSelfTest">重新自检</view>
+			</view>
 		</view>
 	</view>
 
@@ -246,6 +267,7 @@ import {
 import { probe, saveToDownloads } from '../../core/native-fs.js'
 import { writePhotoFile } from '../../core/backup.js'
 import { summarizeFullBackup } from '../../core/fullbackup.js'
+import { runSelfTest } from '../../core/selftest.js'
 import {
 	buildFullBackupZip,
 	deliverFullBackup,
@@ -577,6 +599,27 @@ function showExportError(title, error, json, trace) {
 			if (r.confirm) exportViaClipboard(json, false)
 		},
 	})
+}
+
+/* ---------------- 原生能力自检 ---------------- */
+
+const testing2 = ref(false)
+const testReport = ref('正在自检…')
+
+async function doSelfTest() {
+	testing2.value = true
+	testReport.value = '正在自检…'
+	try {
+		const { text } = await runSelfTest()
+		testReport.value = text
+	} catch (e) {
+		testReport.value = '自检本身出错了：' + String((e && e.message) || e)
+	}
+}
+
+async function copyReport() {
+	const r = await copyText(testReport.value)
+	uni.showToast({ title: r.ok ? '已复制' : '复制失败', icon: 'none' })
 }
 
 /* ---------------- 完整备份（含照片） ---------------- */
@@ -948,6 +991,27 @@ function doClear() {
 	.snap-meta {
 		display: block;
 		margin-top: 4rpx;
+	}
+
+	.self-test-btn {
+		margin-top: $s-3;
+		height: 76rpx;
+		font-size: 26rpx;
+	}
+
+	.report {
+		height: 560rpx;
+		background: $c-fill;
+		border-radius: $r-sm;
+		padding: 18rpx;
+		margin: $s-3 0;
+	}
+
+	.report-t {
+		font-size: 22rpx;
+		line-height: 1.7;
+		color: $c-text-sub;
+		white-space: pre-wrap;
 	}
 
 	.clip-btn {
