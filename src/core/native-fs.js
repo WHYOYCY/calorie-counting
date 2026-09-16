@@ -514,50 +514,126 @@ export async function writeFileBytes(absPath, chunks) {
 	return { ok: false, error: errors.join('  ｜  '), trace: '' }
 }
 /**
- * 原生读一个文件成 base64 —— 只用字符串过桥。
+ * 原生读一个文本文件成字符串。
  *
- * 为什么不用 plus.io：真机上 Java 写进去的文件，plus.io 读不出来
- * （trace 走到 readViaPlus 就断了）。而这条路径全程：
- *   Files.readString(path, ISO-8859-1) → Java String → JS 字符串
- * 字符串是 Native.js 最可靠的编组类型。
- * Files.readString 需要 API 33+（用户设备是 API 36）。
+ * 顺序尝试三条路，并把「文件实际大小」带进报错 ——
+ * Files.size 返回数字，数字过桥在真机上是验证过的，
+ * 下回如果还失败，报错会直接说清「文件明明有 N 字节，读出来却是空」，
+ * 那就能定位是「字符串返回过桥」的问题。
+ *
+ * 1. Files.readString(path)（1 参，UTF-8）—— 不带 Charset 参数：
+ *    真机上带 Charset 的调用返回了空，而 Charset 对象和 byte[] 一样
+ *    是「Java 对象过桥」，属于已知不可靠的类别。
+ * 2. Files.readAllLines(path) → 逐行读，合并 —— 给「大字符串返回」
+ *    可能受限的场合一个备选（base64 每 64 字符换行，行都很小）。
+ * 3. 调用方提供的 plus.io 读取（对 plus.io 自己写的文件可用）。
  */
-export async function readFileBase64Native(absPath) {
+export async function readTextFileNative(absPath, opts = {}) {
 	const trace = []
-	if (!isAndroid()) {
-		return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
-	}
+	const fail = (msg) => ({ ok: false, error: msg, trace: trace.join(' → ') })
+	if (!isAndroid()) return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
+
+	let size = -1
 	try {
-		trace.push('importClass')
+		plus.android.importClass('java.io.File')
 		const Files = plus.android.importClass('java.nio.file.Files')
-		const StandardCharsets = plus.android.importClass('java.nio.charset.StandardCharsets')
-		if (!Files || !StandardCharsets) {
-			throw new Error('importClass 返回空（需 API 33+ 的 java.nio.file）')
+		if (!Files) throw new Error('importClass 返回空（java.nio.file，需 API 26+）')
+
+		trace.push('size')
+		try {
+			size = Number(callJava(Files, 'size', pathOf(absPath)))
+		} catch (e) {
+			size = -1
 		}
-		const cs = staticField(StandardCharsets, 'ISO_8859_1')
-		if (!cs) throw new Error('拿不到 ISO_8859_1 字符集')
+		if (isFinite(size) && size === 0) {
+			return fail(`文件实际是 0 字节（size=0）`)
+		}
 
-		trace.push('readString')
-		const text = callJava(Files, 'readString', pathOf(absPath), cs)
-		if (text === null || text === undefined) throw new Error('readString 返回空')
-
-		trace.push('decode')
-		const bytes = latin1ToBytes(String(text))
-		if (!bytes.length) {
-			return {
-				ok: false,
-				error: '读到的内容是空的（文件可能是 0 字节）',
-				trace: trace.join(' → '),
+		// 路 1：1 参 readString
+		try {
+			trace.push('readString')
+			const text = callJava(Files, 'readString', pathOf(absPath))
+			if (text && String(text).length) {
+				trace.push('ok')
+				return { ok: true, text: String(text), size, trace: trace.join(' → ') }
 			}
+			trace.push('readString空')
+		} catch (e) {
+			trace.push('readString异常')
 		}
 
-		trace.push('ok')
-		return { ok: true, base64: bytesToBase64(bytes), bytes: bytes.length, trace: trace.join(' → ') }
+		// 路 2：readAllLines（1 参，UTF-8）→ List → 数组 → 逐行拼接
+		try {
+			trace.push('readAllLines')
+			const lines = callJava(Files, 'readAllLines', pathOf(absPath))
+			if (lines) {
+				const arr = Array.isArray(lines) ? lines : Array.prototype.slice.call(lines, 0)
+				const text = arr.map((l) => String(l)).join('\n') + (arr.length ? '\n' : '')
+				if (text) {
+					trace.push('ok')
+					return { ok: true, text, size, trace: trace.join(' → ') }
+				}
+			}
+			trace.push('readAllLines空')
+		} catch (e) {
+			trace.push('readAllLines异常')
+		}
+
+		// 路 3：调用方的 plus.io 读取
+		if (opts.readViaPlus) {
+			trace.push('readViaPlus')
+			const r = await opts.readViaPlus()
+			if (r && r.ok && r.base64) {
+				trace.push('ok')
+				return { ok: true, text: r.base64, asBase64: true, size, trace: trace.join(' → ') }
+			}
+			trace.push('readViaPlus失败')
+		}
+
+		return fail(
+			`三条读法都失败${isFinite(size) && size > 0 ? `（文件实际有 ${size} 字节，读出来却是空 —— 字符串返回过桥疑似失效）` : ''}`
+		)
+	} catch (e) {
+		return fail(String((e && e.message) || e))
+	}
+}
+
+/**
+ * 原生写一个文本文件（Files.writeString(Path, String)，UTF-8）。
+ * 写不进去就退回 RandomAccessFile.writeBytes —— 对 ASCII 文本两种等价。
+ */
+export async function writeTextFileNative(absPath, text) {
+	const trace = []
+	if (!isAndroid()) return { ok: false, unsupported: true, error: '当前平台不是 Android', trace: '' }
+	try {
+		plus.android.importClass('java.io.File')
+		const Files = plus.android.importClass('java.nio.file.Files')
+		if (!Files) throw new Error('importClass 返回空（java.nio.file，需 API 26+）')
+
+		trace.push('writeString')
+		let ok = true
+		try {
+			callJava(Files, 'writeString', pathOf(absPath), String(text))
+		} catch (e) {
+			trace.push('writeString异常，退回writeBytes')
+			ok = false
+			const wrote = await writeFileBytes(absPath, [latin1ToBytes(text)])
+			if (!wrote.ok) throw new Error(wrote.error)
+		}
+
+		trace.push('verify')
+		const got = Number(callJava(Files, 'size', pathOf(absPath)))
+		if (isFinite(got) && got !== String(text).length) {
+			throw new Error(`写了 ${text.length} 字符，文件实际只有 ${got} 字节`)
+		}
+		return { ok: true, bytes: String(text).length, method: ok ? 'writeString' : 'writeBytes', trace: trace.join(' → ') }
 	} catch (e) {
 		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
 	}
 }
-/** 把照片字节写进私有目录（恢复备份时用） */
+
+/**
+ * 原生读一个文件成 base64 —— 只用字符串过桥。/** 把照片字节写进私有目录（恢复备份时用） */
 export async function writePhotoFile(bytes, name) {
 	if (!hasPlus()) return { ok: false, error: '当前平台不支持保存照片' }
 	const absDir = absPathOf('_doc/food/')
@@ -673,7 +749,7 @@ function openMediaStoreTarget(filename, mime, sub) {
  *   1. 写的是普通 FileOutputStream，不是 MediaStore 的输出流
  *   2. 从私有文件到下载目录这一段全程在 Java 侧，字节不过我们的桥
  */
-async function copyPrivateFileToDownloads(absPath, filename, mime, expected) {
+export async function copyPrivateFileToDownloads(absPath, filename, mime, expected) {
 	const tr = ['privateFile']
 	const sub = mime && mime.indexOf('image/') === 0 ? 'Pictures' : 'Download'
 	let resolver = null
@@ -760,7 +836,6 @@ export async function readUriBase64(uri, opts = {}) {
 		const input = callJava(resolver, 'openInputStream', uri)
 		if (!input) throw new Error('无法打开输入流')
 
-		// 先问大小，太大就别搬了
 		if (opts.limit) {
 			trace.push('available')
 			let size = 0
@@ -779,42 +854,32 @@ export async function readUriBase64(uri, opts = {}) {
 			}
 		}
 
-		// 关键改动：不在 JS 里接 byte[]（那样内容会丢），
-		// 而是让原生把流落成私有文件，再用 plus.io 读 ——
-		// 后者正是照片识别一直在用的读法，是验证过的。
 		if (!opts.stagingPath) {
 			callJava(input, 'close')
 			return { ok: false, error: '内部错误：缺少落盘路径', trace: trace.join(' → ') }
 		}
+
 		trace.push('nativeCopy')
 		const staged = opts.stagingPath()
 		copyStreamToFile(input, staged)
 		callJava(input, 'close')
 
-		// 首选原生读（只用字符串过桥）
 		trace.push('readNative')
-		const native = await readFileBase64Native(staged)
-		if (native.ok) {
-			trace.push('ok')
-			return { ok: true, base64: native.base64, trace: trace.join(' → ') }
-		}
-		trace.push('readNative失败：' + native.error)
+		const r = await readTextFileNative(staged, { readViaPlus: opts.readViaPlus })
+		if (!r.ok) return { ok: false, error: r.error, trace: trace.join('  ｜  ') + '  ｜  ' + r.trace }
 
-		// 备选：plus.io 读（对 plus.io 自己写的文件是可用的）
-		if (opts.readViaPlus) {
-			trace.push('readViaPlus')
-			const b64 = await opts.readViaPlus()
-			if (b64 && b64.ok && b64.base64) {
-				trace.push('ok')
-				return { ok: true, base64: b64.base64, trace: trace.join(' → ') }
-			}
+		trace.push('ok')
+		return {
+			ok: true,
+			text: r.text,
+			asBase64: !!r.asBase64,
+			size: r.size,
+			trace: trace.join(' → '),
 		}
-		return { ok: false, error: native.error, trace: trace.join(' → ') }
 	} catch (e) {
 		return { ok: false, error: String((e && e.message) || e), trace: trace.join(' → ') }
 	}
 }
-
 /**
  * 让用户选一个文件（SAF，ACTION_OPEN_DOCUMENT），直接读成 base64。
  *

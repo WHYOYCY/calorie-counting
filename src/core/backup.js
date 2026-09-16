@@ -5,13 +5,15 @@
  */
 import { todayKey } from './date.js'
 import { hasStorage, readRaw, writeRaw, removeRaw } from './storage.js'
-import { base64ToBytes } from './zip.js'
+import { base64ToBytes, bytesToBase64 } from './zip.js'
 import {
+	copyPrivateFileToDownloads,
 	writeBytesToDownloads,
 	removePrivateFile,
 	pickFileBytes,
 	absPathOf,
 	hasPlus,
+	writeTextFileNative,
 } from './native-fs.js'
 import { toBase64 } from './photo.js'
 
@@ -248,20 +250,45 @@ export function writeBackupFile(json, filename = backupFileName()) {
  */
 export const FULL_BACKUP_MAX_BYTES = 120 * 1024 * 1024
 
-/** 把完整备份交给用户：H5 浏览器下载 / App 直接写进公共「下载」目录 */
+/**
+ * 备份文件的文本格式头。App 端的备份文件内容是 **base64 文本**（ASCII），
+ * 而不是二进制 —— 因为真机上带 Charset 参数的 readString 返回空，
+ * 而 1 参 readString 是 UTF-8，只有 ASCII 文本两边都能读。
+ * 带这个头，导入时一眼认出来并解码。
+ */
+export const FULL_BACKUP_TEXT_MARK = 'CCFULL1:'
+
+/** 把完整备份交给用户：H5 浏览器下载二进制 zip / App 写 base64 文本进「下载」 */
 export async function persistBackupZip(bytes, filename) {
 	const isH5 = typeof document !== 'undefined' && typeof Blob !== 'undefined'
 
-	// App：直接写进 MediaStore 给的输出流，不经手中转文件。
-	// 早先是「先写 _doc 临时文件 → FileUtils.copy 拷进下载」，
-	// 真机上那一步一个字节都没拷过去（文件是 0 字节）却不报错。
 	if (hasPlus()) {
-		const res = await writeBytesToDownloads(bytes, filename)
-		if (res.ok) return { ok: true, mode: 'downloads', where: res.where, bytes: res.bytes }
-		return { ok: false, error: res.error, trace: res.trace }
+		// App：base64 文本 → 原生写私有文件 → Files.copy 推进下载目录
+		const text = FULL_BACKUP_TEXT_MARK + bytesToBase64(bytes)
+		const localUrl = `_doc/out-${Date.now()}.zip`
+		const abs = absPathOf(localUrl)
+
+		const wrote = await writeTextFileNative(abs, text)
+		if (wrote.ok) {
+			const copied = await copyPrivateFileToDownloads(abs, filename, 'application/zip', text.length)
+			removePrivateFile(localUrl)
+			if (copied.ok) return { ok: true, mode: 'downloads', where: copied.where, bytes: bytes.length }
+			if (copied.kept) {
+				return { ok: false, error: `策略A: ${copied.error}（文件已保留，请到下载目录看一眼）`, trace: copied.trace }
+			}
+		}
+
+		// 退回老路径：二进制直接写 MediaStore 输出流
+		const fallback = await writeBytesToDownloads(bytes, filename)
+		if (fallback.ok) return { ok: true, mode: 'downloads', where: fallback.where, bytes: bytes.length }
+		return {
+			ok: false,
+			error: `文本写: ${wrote.ok ? 'ok' : wrote.error}  ｜  二进制写: ${fallback.error}`,
+			trace: '',
+		}
 	}
 
-	// H5：浏览器下载
+	// H5：浏览器下载（保持二进制 zip，别的解压工具能直接打开）
 	if (isH5) {
 		try {
 			const blob = new Blob([bytes], { type: 'application/zip' })
@@ -279,7 +306,6 @@ export async function persistBackupZip(bytes, filename) {
 
 	return { ok: false, error: '当前环境不支持保存文件' }
 }
-
 /** H5：用 <input type=file> 选一个 zip 并读成字节 */
 function pickZipOnH5() {
 	return new Promise((resolve) => {
@@ -323,27 +349,22 @@ function pickZipOnH5() {
 export async function pickZipFile() {
 	const isH5 = typeof document !== 'undefined'
 
-	if (isH5) return pickZipOnH5()
+	if (isH5) {
+		const picked = await pickZipOnH5()
+		if (!picked.ok || !picked.bytes) return picked
+		return { ...picked, bytes: decodePickedBytes(picked.bytes) }
+	}
 
-	// App：选文件后让**原生**把内容落成私有文件，再用 plus.io 读回来。
-	//
-	// 为什么不直接在 JS 里读成 base64：真机上 readAllBytes() 拿到的 byte[]
-	// 再传给 encodeToString 时内容就丢了（DCloud #220280、#107510 记的
-	// 「invoke 传 byte[] 参数不可靠」）。而 plus.io 读文件是照片识别
-	// 一直在用的路径，是验证过的。
+	// App：选文件 → 原生落盘 → 原生读文本 → 解码
 	const name = `picked-${Date.now()}.zip`
 	const localUrl = `_doc/${name}`
 
 	const picked = await pickFileBytes({
 		limit: FULL_BACKUP_MAX_BYTES,
-		// 原生侧落成私有文件，然后原生读回（只用字符串过桥）
 		stagingPath: () => absPathOf(localUrl),
-		// plus.io 读作为备选 —— 对 Java 写进去的文件它读不出来，
-		// 所以只是兜底，真正靠上面那条
 		readViaPlus: () => toBase64(localUrl, null),
 	})
 
-	// 不管成败都清掉临时文件
 	removePrivateFile(localUrl)
 
 	if (!picked.ok) {
@@ -354,11 +375,41 @@ export async function pickZipFile() {
 			trace: [picked.trace, picked.inner].filter(Boolean).join('  ｜  '),
 		}
 	}
-	if (!picked.base64) return { ok: false, error: '读到的内容是空的', trace: picked.trace }
+	if (!picked.text) return { ok: false, error: '读到的内容是空的', trace: picked.trace }
 
-	return { ok: true, bytes: base64ToBytes(picked.base64), trace: picked.trace }
+	return {
+		ok: true,
+		bytes: decodePickedBytes(picked.text, picked.asBase64),
+		trace: picked.trace,
+	}
 }
-/** 把照片字节写进 App 私有目录（恢复备份时用）
+
+/**
+ * 把读到的内容解码成 zip 字节。
+ * 兼容三种来源：
+ *   App 文本备份（CCFULL1: 开头）  → base64 解码
+ *   plus.io 兜底读到的 base64     → 直接解码
+ *   H5 的二进制 zip                → 原样
+ */
+function decodePickedBytes(content, asBase64) {
+	// 只有字符串才需要解码；二进制直接原样（避免把字节数组 String() 成逗号串）
+	if (typeof content === 'string') {
+		const t = content
+		if (t.indexOf(FULL_BACKUP_TEXT_MARK) === 0) {
+			return base64ToBytes(t.slice(FULL_BACKUP_TEXT_MARK.length))
+		}
+		if (asBase64) return base64ToBytes(t)
+		return latin1BytesOf(t)
+	}
+	return content
+}
+
+/** ISO-8859-1 字符串 → 字节（每码点低 8 位） */
+function latin1BytesOf(text) {
+	const out = new Uint8Array(text.length)
+	for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff
+	return out
+}/** 把照片字节写进 App 私有目录（恢复备份时用）
  *  —— 实现挪到 native-fs.js，二进制写入逻辑集中在一处
  */
 export { writePhotoFile } from './native-fs.js'

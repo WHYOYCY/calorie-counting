@@ -1369,6 +1369,7 @@ eq(back3.payload.records.length, 1, '记录仍在')
 /* ========== 完整备份的编排（导出/恢复） ========== */
 
 const FBIO = await import('../src/core/fullbackup-io.js')
+const BK = await import('../src/core/backup.js')
 
 group('fullbackup-io.js · 导出整体流程')
 
@@ -1930,6 +1931,18 @@ function fakeMediaStore(opts = {}) {
 				for (let i = 0; i < box.bytes.length; i++) out += String.fromCharCode(box.bytes[i])
 				return out
 			},
+			readAllLines: (p) => {
+				if (opts.readAllLinesThrows) throw new Error('Files.readAllLines 不可用')
+				const box = files.get(p && p.path)
+				if (!box) throw new Error('文件不存在')
+				let out = ''
+				for (let i = 0; i < box.bytes.length; i++) out += String.fromCharCode(box.bytes[i])
+				return [out]
+			},
+			size: (p) => {
+				const box = files.get(p && p.path)
+				return box ? box.bytes.length : 0
+			},
 		},
 	}
 
@@ -2043,20 +2056,24 @@ await withMediaStore({}, async (env) => {
 group('native-fs.js · 从 SAF 读回（全程原生）')
 
 await withMediaStore({}, async (env) => {
-	// 先用写入路径造一份数据，再原路读回 —— 两处编码都对才能往返一致
-	await NFS.writeBytesToDownloads(ALL_BYTES, 'rt.zip')
 	const staged = 'ABS:/_doc/picked.zip'
+	// 完整往返：走 App 真实路径（导出 = base64 文本格式）
+	const out = await BK.persistBackupZip(ALL_BYTES, 'rt.zip')
+	eq(out.ok, true, '★ 导出成功（base64 文本格式）')
+	ok(String(out.where).indexOf('Download/') >= 0, `位置：${out.where}`)
+
 	const read = await NFS.readUriBase64(
 		{ _kind: 'uri', url: env.firstUri() },
-		{
-			// 调用方只需给出落盘路径；读回由 native-fs 自己完成
-			stagingPath: () => staged,
-		}
+		{ stagingPath: () => staged }
 	)
 	eq(read.ok, true, '读取成功')
 	ok(String(read.trace).indexOf('nativeCopy') >= 0, `★ 走了原生搬运：${read.trace}`)
 	ok(String(read.trace).indexOf('readNative') >= 0, `★ 用原生读回而不是 plus.io：${read.trace}`)
-	const got = Buffer.from(read.base64, 'base64')
+	ok(
+		String(read.text).indexOf('CCFULL1:') === 0,
+		'★ 内容是带文件头的 base64 文本'
+	)
+	const got = base64ToBytes(String(read.text).slice('CCFULL1:'.length))
 	eq(got.length, 256, '读回字节数对')
 	eq([...got].join(','), [...ALL_BYTES].join(','), '★ 写入→读回 逐字节一致')
 })
@@ -2073,7 +2090,7 @@ await withMediaStore({}, async (env) => {
 	eq(read.ok, false, '★ 0 字节的文件 → 判为失败')
 	ok(
 		String(read.error).indexOf('0 字节') >= 0,
-		`★ 直接说出「文件可能是 0 字节」：${read.error}`
+		`★ 直接说出「文件实际是 0 字节」：${read.error}`
 	)
 })
 
