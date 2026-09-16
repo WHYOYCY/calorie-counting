@@ -5,14 +5,12 @@
  */
 import { todayKey } from './date.js'
 import { hasStorage, readRaw, writeRaw, removeRaw } from './storage.js'
-import { toBase64 } from './photo.js'
 import { base64ToBytes } from './zip.js'
 import {
-	writePrivateFile,
+	writeBytesToDownloads,
 	removePrivateFile,
-	copyPrivateToDownloads,
 	pickFileBytes,
-	readFileBase64Native,
+	hasPlus,
 } from './native-fs.js'
 
 export function backupFileName() {
@@ -248,27 +246,17 @@ export function writeBackupFile(json, filename = backupFileName()) {
  */
 export const FULL_BACKUP_MAX_BYTES = 120 * 1024 * 1024
 
-/** 把完整备份交给用户：H5 浏览器下载 / App 落私有目录再进公共下载目录 */
+/** 把完整备份交给用户：H5 浏览器下载 / App 直接写进公共「下载」目录 */
 export async function persistBackupZip(bytes, filename) {
 	const isH5 = typeof document !== 'undefined' && typeof Blob !== 'undefined'
-	const app = typeof plus !== 'undefined' && !!plus && plus.io && plus.io.requestFileSystem
 
-	// App：plus.io 写私有目录 → 原生 FileUtils.copy 进公共「下载」
-	if (app) {
-		const wrote = await writePrivateFile(bytes, filename)
-		if (!wrote.ok) {
-			return { ok: false, error: wrote.error || '写入临时文件失败', trace: '' }
-		}
-		const copied = await copyPrivateToDownloads(wrote.path, filename)
-		// 临时文件不管成不成功都删掉，别在私有目录里留一份几百 MB 的副本
-		removePrivateFile(wrote.path)
-		if (copied.ok) return { ok: true, mode: 'downloads', where: copied.where }
-		return {
-			ok: false,
-			mode: 'private',
-			error: copied.error,
-			trace: copied.trace,
-		}
+	// App：直接写进 MediaStore 给的输出流，不经手中转文件。
+	// 早先是「先写 _doc 临时文件 → FileUtils.copy 拷进下载」，
+	// 真机上那一步一个字节都没拷过去（文件是 0 字节）却不报错。
+	if (hasPlus()) {
+		const res = await writeBytesToDownloads(bytes, filename)
+		if (res.ok) return { ok: true, mode: 'downloads', where: res.where, bytes: res.bytes }
+		return { ok: false, error: res.error, trace: res.trace }
 	}
 
 	// H5：浏览器下载
@@ -335,70 +323,20 @@ export async function pickZipFile() {
 
 	if (isH5) return pickZipOnH5()
 
-	const picked = await pickFileBytes()
-	if (!picked.ok) return picked
-
-	// 先看大小，太大就别读了（读进来会 base64 膨胀 33%）
-	const size = await privateFileSize(picked.path)
-	if (size > FULL_BACKUP_MAX_BYTES) {
-		removePrivateFile(picked.path)
-		return { ok: false, error: '这个备份文件太大了，当前版本不支持' }
-	}
-
-	// 第一条：plus.io 的文件层（与照片识别同一条路）
-	const b64 = await toBase64(picked.path, null)
-	if (b64.ok) {
-		removePrivateFile(picked.path)
-		return { ok: true, bytes: base64ToBytes(b64.base64), trace: picked.trace }
-	}
-
-	// 第二条：绕开 plus.io，用 Native.js 直接读（InputStream → Base64）
-	// 真机上 plus.io 读这个临时文件失败过，所以要有一条不依赖它的路
-	let native = { ok: false, error: '没有绝对路径可用' }
-	if (picked.absPath) native = await readFileBase64Native(picked.absPath)
-
-	removePrivateFile(picked.path)
-
-	if (native.ok) {
-		return { ok: true, bytes: base64ToBytes(native.base64), trace: picked.trace }
-	}
-
-	// 两条都失败：把每条路的失败原因都摆出来，不让人只能靠猜
-	return {
-		ok: false,
-		error: '读取所选文件失败',
-		trace: [
-			picked.trace,
-			'plus.io: ' + (b64.tried || []).join(' / '),
-			'native: ' + (native.trace || native.error),
-		]
-			.filter(Boolean)
-			.join('  ｜  '),
-	}
-}
-
-/** 读私有文件的大小（读不到返回 0，交给后面的读取去报错） */
-function privateFileSize(path) {
-	return new Promise((resolve) => {
-		if (typeof plus === 'undefined' || !plus || !plus.io || !plus.io.resolveLocalFileSystemURL) {
-			resolve(0)
-			return
+	// App：选文件的同时就直接读成 base64。
+	// 不再「先拷到临时文件再用 plus.io 读」—— 真机上那一套读出来是空文件。
+	const picked = await pickFileBytes({ limit: FULL_BACKUP_MAX_BYTES })
+	if (!picked.ok) {
+		if (picked.cancelled) return picked
+		return {
+			ok: false,
+			error: picked.error || '读取所选文件失败',
+			trace: [picked.trace, picked.inner].filter(Boolean).join('  ｜  '),
 		}
-		try {
-			plus.io.resolveLocalFileSystemURL(
-				path,
-				(entry) => {
-					entry.file(
-						(f) => resolve(Number(f && f.size) || 0),
-						() => resolve(0)
-					)
-				},
-				() => resolve(0)
-			)
-		} catch (e) {
-			resolve(0)
-		}
-	})
+	}
+	if (!picked.base64) return { ok: false, error: '读到的内容是空的', trace: picked.trace }
+
+	return { ok: true, bytes: base64ToBytes(picked.base64), trace: picked.trace }
 }
 
 /** 把照片字节写进 App 私有目录（恢复备份时用）

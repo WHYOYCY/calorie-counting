@@ -954,6 +954,7 @@ function fakePlus(opts = {}) {
 
 	const classes = {
 		'android.os.Build': { VERSION: { SDK_INT: opts.sdk === undefined ? 36 : opts.sdk } },
+		'android.provider.MediaStore$MediaColumns': { SIZE: '_size' },
 		'android.provider.MediaStore$Downloads': {
 			DISPLAY_NAME: '_display_name',
 			MIME_TYPE: 'mime_type',
@@ -1712,104 +1713,6 @@ await withJavaFs({ importNullFor: 'java.io.FileOutputStream' }, async () => {
 	ok(String(res.error).indexOf('链入') >= 0, `提示基座问题：${res.error}`)
 })
 
-group('native-fs.js · 把 Blob 拿掉再写一遍（模拟 App 逻辑层）')
-
-await withJavaFs({}, async (env) => {
-	const saved = globalThis.Blob
-	delete globalThis.Blob
-	try {
-		eq(typeof Blob, 'undefined', '确认当前环境已经没有 Blob 了')
-		const res = await NFS.writePrivateFile(ALL_BYTES, 'noblob.zip')
-		eq(res.ok, true, '★ 没有 Blob 也能写（真机报的「内核不支持 Blob」就是这条路）')
-		eq(
-			env.files.get('ABS:/_doc/noblob.zip').length,
-			256,
-			'★ 内容逐字节完整'
-		)
-		const photo = await NFS.writePhotoFile(new Uint8Array([7, 6, 5]), 'p.jpg')
-		eq(photo.ok, true, '★ 没 Blob 也能写照片（恢复备份要用）')
-	} finally {
-		globalThis.Blob = saved
-	}
-})
-
-group('native-fs.js · 私有文件与照片写入')
-
-await withJavaFs({}, async (env) => {
-	const res = await NFS.writePrivateFile(ALL_BYTES, 'bak.zip')
-	eq(res.ok, true, '写私有文件成功')
-	eq(res.path, '_doc/bak.zip', '返回可用的相对路径')
-	eq(env.files.get('ABS:/_doc/bak.zip').length, 256, '内容进了正确的位置')
-})
-
-await withJavaFs({}, async (env) => {
-	const res = await NFS.writePhotoFile(new Uint8Array([9, 8, 7]), 'food_1.jpg')
-	eq(res.ok, true, '写照片成功')
-	eq(res.path, '_doc/food/food_1.jpg', '照片路径对')
-	eq(env.files.get('ABS:/_doc/food/food_1.jpg').join(','), '9,8,7', '照片字节对')
-	ok(
-		env.dirs.has('ABS:/_doc/food') || env.dirs.size > 0,
-		'★ 先建了照片目录（FileOutputStream 不会自动建目录）'
-	)
-})
-
-eq(
-	(await withJavaFs({}, () => NFS.writePrivateFile(new Uint8Array([1]), 'x.zip'))).ok,
-	true,
-	'没有 plus.io 也能拿到路径（走 convertLocalFileSystemURL）'
-)
-
-group('native-fs.js · 二进制写入→原生读回 完整往返')
-
-// 关键：写用 ISO-8859-1 过桥，读用 InputStream → Base64。
-// 两条路都经过「字节→字符串→字节」的转换，往返一致就说明两处都对。
-await withJavaFs({}, async (env) => {
-	const wrote = await NFS.writeFileBytes('ABS:/tmp/rt.zip', [ALL_BYTES])
-	eq(wrote.ok, true, '先写进去 256 种字节')
-
-	const read = await NFS.readFileBase64Native('ABS:/tmp/rt.zip')
-	eq(read.ok, true, '原生读取成功')
-	const roundTrip = Buffer.from(read.base64, 'base64')
-	eq(roundTrip.length, 256, '读回的字节数对')
-	eq(
-		[...roundTrip].join(','),
-		[...ALL_BYTES].join(','),
-		'★ 写入→读回 全部 256 种字节值逐字节一致'
-	)
-})
-
-// 多块流式写入后读回，也要完整
-await withJavaFs({}, async () => {
-	const a = new Uint8Array([0, 1, 2])
-	const b = new Uint8Array(1000).fill(200)
-	const c = new Uint8Array([255])
-	await NFS.writeFileBytes('ABS:/tmp/rt2.zip', [a, b, c])
-	const read = await NFS.readFileBase64Native('ABS:/tmp/rt2.zip')
-	const got = Buffer.from(read.base64, 'base64')
-	eq(got.length, 1004, '多块拼接后长度对')
-	eq(got[0] === 0 && got[3] === 200 && got[1003] === 255, true, '首/中/尾字节都对')
-})
-
-group('native-fs.js · 原生读取的失败路径')
-
-await withJavaFs({ readThrows: true }, async () => {
-	const r = await NFS.readFileBase64Native('ABS:/tmp/x.zip')
-	eq(r.ok, false, 'readAllBytes 抛异常 → 失败而不是崩')
-	ok(String(r.error).indexOf('readAllBytes') >= 0, `报出环节：${r.error}`)
-})
-
-await withJavaFs({ importNullFor: 'android.util.Base64' }, async () => {
-	const r = await NFS.readFileBase64Native('ABS:/tmp/x.zip')
-	eq(r.ok, false, 'importClass 返回空 → 失败')
-	ok(String(r.error).indexOf('链入') >= 0, `提示基座问题：${r.error}`)
-})
-
-eq(
-	(await withJavaFs({}, () => NFS.readFileBase64Native('ABS:/tmp/never.zip'))).ok,
-	false,
-	'文件不存在时返回失败而不是抛异常'
-)
-
 group('photo.js · 读取失败时要能看出是哪一环')
 
 // Node 里既没有 File 对象、也没有 plus、也没有 FileSystemManager
@@ -1825,6 +1728,247 @@ ok(
 	String(b64fail.tried.join(' ')).indexOf('plus.io') >= 0,
 	'列举了 plus.io 这一环'
 )
+
+/* ========== 写进公共下载 / 从 SAF 读回（不经手中转文件） ========== */
+
+/**
+ * 假 MediaStore。
+ *
+ * 关键：模拟真机的真实行为 —— 写进去多少字节就是多少，不做任何“好心”的转换，
+ * 这样才能验出「写进去的是不是原样」以及「空文件能不能被发现」。
+ */
+function fakeMediaStore(opts = {}) {
+	const docs = new Map()
+	const dirs = new Set()
+	let seq = 0
+
+	const impl = {
+		// 忠实地按 ISO-8859-1 编码：每个码点 → 一个字节
+		jstring: {
+			getBytes: (o) => {
+				const s = o.s
+				const out = new Uint8Array(s.length)
+				for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff
+				return out
+			},
+		},
+		activity: { getContentResolver: () => ({ _kind: 'resolver' }) },
+		// 注意：invoke 会把接收者对象作为第一个参数传进来（与 jstring/os/is 一致）
+		resolver: {
+			insert: (self, uri, values) => {
+				if (opts.insertNull) return null
+				const url = 'content://downloads/' + ++seq
+				docs.set(url, { name: values.vals._display_name, bytes: [], dropped: !!opts.dropWrites })
+				return { _kind: 'uri', url }
+			},
+			openOutputStream: (self, uri) => {
+				if (opts.openOutNull) return null
+				return { _kind: 'os', url: uri.url }
+			},
+			openInputStream: (self, uri) => {
+				if (opts.openInNull) return null
+				return { _kind: 'is', url: uri.url }
+			},
+			delete: (self, uri) => {
+				docs.delete(uri && uri.url)
+				return 1
+			},
+			query: (self, uri) => {
+				if (opts.queryNull) return null
+				const d = docs.get(uri && uri.url)
+				if (!d) return null
+				return { _kind: 'cursor', size: d.bytes.length }
+			},
+		},
+		cursor: {
+			moveToFirst: () => true,
+			getColumnIndex: () => 0,
+			getLong: (o) => o.size,
+			close: () => {},
+		},
+		os: {
+			write: (o, bytes) => {
+				const d = docs.get(o.url)
+				if (!d) return
+				// dropWrites 模拟真机上那个「不报错但一个字节都没写进去」的情况
+				if (d.dropped) return
+				for (let i = 0; i < bytes.length; i++) d.bytes.push(bytes[i])
+			},
+			flush: () => {},
+			close: () => {},
+		},
+		is: {
+			available: (o) => (docs.get(o.url) ? docs.get(o.url).bytes.length : 0),
+			readAllBytes: (o) => Uint8Array.from(docs.get(o.url).bytes),
+			close: () => {},
+		},
+		fos: {
+			write: (o, bytes) => {
+				const list = docs.get(o.path) || []
+				for (let i = 0; i < bytes.length; i++) list.push(bytes[i])
+				docs.set(o.path, list)
+			},
+			flush: () => {},
+			close: () => {},
+		},
+		file: {
+			exists: (o) => dirs.has(o.path),
+			mkdirs: (o) => {
+				dirs.add(o.path)
+				return true
+			},
+		},
+	}
+
+	const Bas64 = {
+		NO_WRAP: 2,
+		encodeToString: (bytes) => Buffer.from(Uint8Array.from(bytes)).toString('base64'),
+	}
+
+	const classes = {
+		'android.os.Build': { VERSION: { SDK_INT: opts.sdk === undefined ? 36 : opts.sdk } },
+		'java.lang.String': function JString(s) {
+			return { _kind: 'jstring', s: String(s) }
+		},
+		'android.content.ContentValues': function ContentValues() {
+			this.vals = {}
+			this.put = (k, v) => {
+				this.vals[k] = v
+			}
+		},
+		'android.provider.MediaStore$Downloads': {
+			DISPLAY_NAME: '_display_name',
+			MIME_TYPE: 'mime_type',
+			RELATIVE_PATH: 'relative_path',
+			EXTERNAL_CONTENT_URI: { _kind: 'uri', url: 'content://downloads' },
+		},
+		'java.io.FileOutputStream': function FileOutputStream(p) {
+			if (opts.openOutThrows) throw new Error('打不开文件')
+			if (!docs.has(p)) docs.set(p, [])
+			return { _kind: 'fos', path: p }
+		},
+		'java.io.File': function File(p) {
+			return { _kind: 'file', path: p }
+		},
+	}
+
+	const android = {
+		importClass: (name) => {
+			if (opts.importNullFor === name) return null
+			if (name === 'android.util.Base64') return Bas64
+			return classes[name] || {}
+		},
+		invoke: function (obj, name) {
+			const args = Array.prototype.slice.call(arguments, 2)
+			if (obj && typeof obj[name] === 'function') return obj[name].apply(obj, args)
+			const fn = impl[obj && obj._kind] && impl[obj && obj._kind][name]
+			if (!fn) throw new Error(`${obj && obj._kind}.${name} is not a function`)
+			return fn.apply(null, [obj].concat(args))
+		},
+		getAttribute: (cls, name) => (cls ? cls[name] : null),
+		runtimeMainActivity: () => ({ _kind: 'activity' }),
+	}
+
+	return { plus: { android }, docs, dirs, firstUri: () => 'content://downloads/1' }
+}
+
+const withMediaStore = async (opts, fn) => {
+	const env = fakeMediaStore(opts)
+	globalThis.plus = env.plus
+	try {
+		return await fn(env)
+	} finally {
+		delete globalThis.plus
+	}
+}
+
+group('native-fs.js · 直接写进公共下载（不经手中转文件）')
+
+await withMediaStore({}, async (env) => {
+	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'bak.zip')
+	eq(res.ok, true, '写入成功')
+	eq(res.bytes, 256, '写入字节数对')
+	ok(String(res.where).indexOf('下载/') >= 0, `返回可读位置：${res.where}`)
+	const doc = env.docs.get(env.firstUri())
+
+eq(doc.name, 'bak.zip', '文件名写进了 MediaStore')
+	eq(doc.bytes.length, 256, '★ 文件里确实是 256 字节')
+	eq(
+		doc.bytes.map((b) => String(b).padStart(3, '0')).join(','),
+		[...ALL_BYTES].map((b) => String(b).padStart(3, '0')).join(','),
+		'★ 全部 256 种字节值逐字节一致（ISO-8859-1 过桥无损）'
+	)
+})
+
+// 真机踩到的那个坑：不报错，但一个字节都没写进去
+group('native-fs.js · 「没写进去」必须被当成失败（真机就是这个症状）')
+
+await withMediaStore({ dropWrites: true }, async (env) => {
+	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'bak.zip')
+	eq(res.ok, false, '★ 一个字节都没写进去 → 报失败，而不是默默当成功')
+	ok(
+		String(res.error).indexOf('大小不对') >= 0 && String(res.error).indexOf('0 字节') >= 0,
+		`★ 直接说出「写了多少、实际多少」：${res.error}`
+	)
+	eq(env.docs.size, 0, '★ 失败时把那个空文件删掉了')
+})
+
+await withMediaStore({ insertNull: true }, async () => {
+	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'a.zip')
+	eq(res.ok, false, 'insert 返回空 → 失败')
+})
+
+await withMediaStore({ openOutNull: true }, async (env) => {
+	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'a.zip')
+	eq(res.ok, false, 'openOutputStream 返回空 → 失败')
+	eq(env.docs.size, 0, '失败时清理了空文件')
+})
+
+group('native-fs.js · 从 SAF 读回（全程原生）')
+
+await withMediaStore({}, async (env) => {
+	// 先用写入路径造一份数据，再原路读回 —— 两处编码都对才能往返一致
+	await NFS.writeBytesToDownloads(ALL_BYTES, 'rt.zip')
+	const read = await NFS.readUriBase64({ _kind: 'uri', url: env.firstUri() })
+	eq(read.ok, true, '读取成功')
+	const got = Buffer.from(read.base64, 'base64')
+	eq(got.length, 256, '读回字节数对')
+	eq([...got].join(','), [...ALL_BYTES].join(','), '★ 写入→读回 逐字节一致')
+	ok(String(read.trace).indexOf('ok') >= 0, `trace 完整：${read.trace}`)
+})
+
+// 读到的内容是空 —— 用户真机上报的就是这个症状，必须能被识别出来
+await withMediaStore({}, async (env) => {
+	// 造一个 0 字节的文件（真机上 FileUtils.copy 就是这样）
+	env.docs.set('content://downloads/99', { name: 'empty.zip', bytes: [] })
+	const read = await NFS.readUriBase64({ _kind: 'uri', url: 'content://downloads/99' })
+	eq(read.ok, false, '★ 0 字节的文件 → 判为失败')
+	ok(
+		String(read.error).indexOf('0 字节') >= 0,
+		`★ 直接说出「文件可能是 0 字节」：${read.error}`
+	)
+})
+
+group('native-fs.js · 读取的失败路径与体积上限')
+
+await withMediaStore({ openInNull: true }, async () => {
+	const r = await NFS.readUriBase64({ _kind: 'uri', url: 'x' })
+	eq(r.ok, false, 'openInputStream 返回空 → 失败')
+})
+
+await withMediaStore({ importNullFor: 'android.util.Base64' }, async () => {
+	const r = await NFS.readUriBase64({ _kind: 'uri', url: 'x' })
+	eq(r.ok, false, 'importClass 返回空 → 失败')
+	ok(String(r.error).indexOf('链入') >= 0, `提示基座问题：${r.error}`)
+})
+
+await withMediaStore({}, async (env) => {
+	await NFS.writeBytesToDownloads(ALL_BYTES, 'big.zip')
+	const r = await NFS.readUriBase64({ _kind: 'uri', url: env.firstUri() }, { limit: 10 })
+	eq(r.ok, false, '★ 超过体积上限 → 不读进来')
+	ok(String(r.error).indexOf('太大') >= 0, `原因：${r.error}`)
+	ok(String(r.trace).indexOf('available') >= 0, 'trace 显示先问过大小')
+})
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
