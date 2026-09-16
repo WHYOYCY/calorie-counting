@@ -62,11 +62,17 @@ node scripts/mock-dashscope.mjs 5555
 
 ```bash
 npm test          # 模板绑定检查 + 核心逻辑单元测试
-npm run check     # 只查模板绑定
+npm run check     # 静态检查（模板绑定 + Native.js 类导入）
 npm run test:core # 只跑核心逻辑单元测试
 ```
 
-`npm test` 是两道关：
+ 是两道静态检查，Unknown command: "test"
+
+
+Did you mean this?
+  npm test # Test a package
+To see a list of supported npm commands, run:
+  npm help 在其之上再跑单元测试。
 
 1. **模板绑定检查**（`scripts/check-templates.mjs`）—— 把模板里引用到的标识符与
    `<script setup>` 里声明的名字做差集。这类错误单元测试完全抓不到

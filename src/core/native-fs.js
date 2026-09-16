@@ -400,10 +400,11 @@ export function copyPrivateToDownloads(privatePath, filename) {
 			plus.android.importClass('android.content.ContentResolver')
 			plus.android.importClass('java.io.OutputStream')
 			plus.android.importClass('java.io.FileInputStream')
+			const FileInputStream = plus.android.importClass('java.io.FileInputStream')
 			const Downloads = plus.android.importClass('android.provider.MediaStore$Downloads')
 			const ContentValues = plus.android.importClass('android.content.ContentValues')
 			const FileUtils = plus.android.importClass('android.os.FileUtils')
-			if (!Downloads || !ContentValues || !FileUtils) {
+			if (!Downloads || !ContentValues || !FileUtils || !FileInputStream) {
 				throw new Error('importClass 返回空（该基座可能没链入 MediaStore / FileUtils）')
 			}
 
@@ -439,7 +440,6 @@ export function copyPrivateToDownloads(privatePath, filename) {
 			if (!os) throw new Error('无法打开输出流')
 
 			trace.push('FileUtils.copy')
-			const FileInputStream = plus.android.importClass('java.io.FileInputStream')
 			const input = new FileInputStream(abs)
 			callJava(FileUtils, 'copy', input, os)
 			callJava(os, 'flush')
@@ -499,13 +499,14 @@ export function pickFileBytes(opts = {}) {
 
 		try {
 			trace.push('importClass')
-			plus.android.importClass('android.content.Intent')
+			// 必须接收返回值！importClass 不会在当前作用域创建同名绑定，
+			// 不接收却直接 new Xxx()，真机会报「Xxx is not defined」。
 			plus.android.importClass('android.content.ContentResolver')
 			plus.android.importClass('java.io.InputStream')
-			plus.android.importClass('java.io.FileOutputStream')
 			const Intent = plus.android.importClass('android.content.Intent')
 			const FileUtils = plus.android.importClass('android.os.FileUtils')
-			if (!Intent || !FileUtils) throw new Error('importClass 返回空')
+			const FileOutputStream = plus.android.importClass('java.io.FileOutputStream')
+			if (!Intent || !FileUtils || !FileOutputStream) throw new Error('importClass 返回空')
 
 			trace.push('buildIntent')
 			const main = plus.android.runtimeMainActivity()

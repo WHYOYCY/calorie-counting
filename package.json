@@ -12,7 +12,7 @@
     "build:app-android": "uni build -p app-android",
     "test": "node scripts/check-templates.mjs && esbuild scripts/test-core.mjs --bundle --platform=node --format=esm --outfile=node_modules/.cache/cc-test.mjs --log-level=warning && node node_modules/.cache/cc-test.mjs",
     "test:core": "esbuild scripts/test-core.mjs --bundle --platform=node --format=esm --outfile=node_modules/.cache/cc-test.mjs --log-level=warning && node node_modules/.cache/cc-test.mjs",
-    "check": "node scripts/check-templates.mjs",
+    "check": "node scripts/check-templates.mjs && node scripts/check-native.mjs",
     "icons": "node scripts/gen-icons.mjs"
   },
   "dependencies": {
