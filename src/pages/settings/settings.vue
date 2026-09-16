@@ -501,7 +501,7 @@ async function exportToDownloads(json) {
 	}
 
 	// 失败要把原因摆出来 —— 这条路只能在真机验证，需要用户把报错告诉我
-	showExportError('保存到下载目录失败', res.error, json)
+	showExportError('保存到下载目录失败', res.error, json, res.trace)
 }
 
 /** 走系统分享面板（只能发文本） */
@@ -531,18 +531,20 @@ async function exportViaClipboard(json, quiet) {
 }
 
 /** 导出失败：把诊断信息一并给出，方便排查（这条路只能真机验） */
-function showExportError(title, error, json) {
+function showExportError(title, error, json, trace) {
 	const p = probe()
-	const detail = [
+	const lines = [
 		`原因：${error || '未知'}`,
-		`Android 版本：${p.isAndroid ? 'API ' + p.sdk : '非 Android'}`,
-		`MediaStore 可用：${p.canSaveToDownloads ? '是' : '否'}`,
-		`系统分享可用：${p.canShare ? '是' : '否'}`,
-	].join('\n')
+		`Android：API ${p.isAndroid ? p.sdk : '非 Android'}`,
+		`MediaStore：${p.canSaveToDownloads ? '按 SDK 判断可用' : '不可用'}`,
+		`系统分享：${p.canShare ? '可用' : '不可用'}`,
+	]
+	// 失败发生在哪一步最关键：Native.js 的报错经常只在某一环出现
+	if (trace) lines.push(`失败步骤：${trace}`)
 
 	uni.showModal({
 		title,
-		content: `${detail}\n\n要改成复制到剪贴板吗？`,
+		content: `${lines.join('\n')}\n\n要改成复制到剪贴板吗？`,
 		confirmText: '复制备份',
 		cancelText: '好',
 		success: (r) => {

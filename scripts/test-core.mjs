@@ -887,6 +887,230 @@ const restored = importAll(snap.payload, 'replace')
 eq(restored.ok, true, '从快照恢复成功')
 eq(allRecords().length, 2, '★ 记录回来了')
 
+/* ========== Native.js 落盘：用假 plus 复现真机报错 ========== */
+
+/**
+ * 造一个假 Native.js 环境。
+ *
+ * 关键在于：从 Java 返回的实例（resolver / os）在 JS 侧**没有方法** ——
+ * 这正是真机上 `resolver.insert is not a function` 的成因。
+ * 只有 plus.android.invoke 能真正调到实现；直接点调用会招。
+ */
+function fakePlus(opts = {}) {
+	const files = new Map()
+	const calls = []
+	const resolver = { _kind: 'resolver' }
+
+	const impl = {
+		activity: {
+			getContentResolver: () => resolver,
+		},
+		resolver: {
+			insert: (uri, values) => {
+				if (opts.insertNull) return null
+				const u = 'content://downloads/' + (files.size + 1)
+				files.set(u, { values, text: '' })
+				return { _kind: 'uri', url: u }
+			},
+			openOutputStream: (uri) => {
+				if (opts.openNull) return null
+				return { _kind: 'os', uri: uri && uri.url }
+			},
+			delete: (uri) => {
+				files.delete(uri && uri.url)
+				return 1
+			},
+		},
+		os: {
+			write: (x) => {
+				if (opts.writeThrows) throw new Error('write 失败')
+				const last = [...files.values()].pop()
+				if (last) last.text += typeof x === 'string' ? x : String(x)
+			},
+			flush: () => {},
+			close: () => {},
+		},
+		writer: {
+			write: (x) => {
+				if (opts.writerThrows) throw new Error('OutputStreamWriter 不可用')
+				const last = [...files.values()].pop()
+				if (last) last.text += String(x)
+			},
+			flush: () => {},
+			close: () => {},
+		},
+		jstring: {
+			getBytes: () => (opts.getBytesNull ? null : '<bytes>'),
+		},
+	}
+
+	// missingMethod = 模拟「invoke 也调不到」的情形，也就是用户遇到的
+	// resolver.insert is not a function
+	if (opts.missingMethod) delete impl.resolver[opts.missingMethod]
+
+	const classes = {
+		'android.os.Build': { VERSION: { SDK_INT: opts.sdk === undefined ? 36 : opts.sdk } },
+		'android.provider.MediaStore$Downloads': {
+			DISPLAY_NAME: '_display_name',
+			MIME_TYPE: 'mime_type',
+			RELATIVE_PATH: 'relative_path',
+			EXTERNAL_CONTENT_URI: { _kind: 'uri', url: 'content://downloads' },
+		},
+		'android.content.ContentValues': function ContentValues() {
+			this.vals = {}
+			this.put = (k, v) => {
+				this.vals[k] = v
+			}
+		},
+		'java.io.OutputStreamWriter': function OutputStreamWriter() {
+			return { _kind: 'writer' }
+		},
+		'java.lang.String': function JString() {
+			return { _kind: 'jstring' }
+		},
+	}
+
+	// opts.noInvoke = 模拟没有 plus.android.invoke 的旧环境
+	const android = {
+		runtimeMainActivity: () => ({ _kind: 'activity' }),
+		importClass: (name) => {
+			calls.push('importClass:' + name)
+			if (opts.importNullFor && opts.importNullFor === name) return null
+			return classes[name] || {}
+		},
+		getAttribute: (cls, name) => (cls ? cls[name] : null),
+	}
+	// 注意：必须用普通函数 / rest 参数，不能用箭头函数 ——
+	// 箭头函数里的 arguments 指向外层作用域，会把参数全丢掉
+	if (!opts.noInvoke) {
+		android.invoke = function (obj, name) {
+			const args = Array.prototype.slice.call(arguments, 2)
+			// JS 侧自己 new 出来的对象直接调；Java 返回的实例没方法，得走实现表
+			if (obj && typeof obj[name] === 'function') return obj[name].apply(obj, args)
+			const t = obj && obj._kind
+			const fn = impl[t] && impl[t][name]
+			if (!fn) throw new Error(`${t}.${name} is not a function`)
+			return fn.apply(null, args)
+		}
+	}
+	return { plus: { android }, files, calls, resolver }
+}
+
+const withPlus = (opts, fn) => {
+	const env = fakePlus(opts)
+	globalThis.plus = env.plus
+	return Promise.resolve(fn(env)).finally(() => {
+		delete globalThis.plus
+	})
+}
+
+const { saveToDownloads, probe, isAndroid } = await import('../src/core/native-fs.js')
+
+group('native-fs.js · 保存到下载目录（用假 plus 模拟 Native.js）')
+
+await withPlus({}, async (env) => {
+	const res = await saveToDownloads('{"a":1}', 'bak.json')
+	eq(res.ok, true, '★ 能成功写入')
+
+eq([...env.files.values()][0].text, '{"a":1}', '★ 内容完整落盘')
+	ok(String(res.where).includes('下载/'), '返回可读位置')
+	ok(
+		env.calls.some((c) => c.indexOf('ContentResolver') >= 0),
+		'★ 先 importClass 了 ContentResolver（方法才可见）'
+	)
+})
+
+// 没有 plus.android.invoke 的降级：不能崩，要给看得懂的报错
+await withPlus({ noInvoke: true }, async () => {
+	const res = await saveToDownloads('x', 'a.json')
+	eq(res.ok, false, '没有 plus.android.invoke 时不会崩，而是返回失败')
+	ok(
+		String(res.error).indexOf('未暴露给 JS') >= 0,
+		`★ 给出看得懂的原因而不是 TypeError：${res.error}`
+	)
+	ok(
+		String(res.trace).indexOf('getContentResolver') >= 0,
+		`trace 指到出问题的环节：${res.trace}`
+	)
+})
+
+// invoke 存在但真的调不到方法时（就是用户遇到的 resolver.insert is not a function）
+await withPlus({ missingMethod: 'insert' }, async (env) => {
+	const res = await saveToDownloads('x', 'a.json')
+	eq(res.ok, false, '调不到 insert 时失败')
+	ok(
+		String(res.error).indexOf('is not a function') >= 0,
+		`★ 复现真机那类报错：${res.error}`
+	)
+	ok(String(res.trace).indexOf('insert') >= 0, `trace 指到 insert：${res.trace}`)
+})
+
+await withPlus({}, async (env) => {
+	const res = await saveToDownloads('y', 'b.json')
+	eq(res.ok, true, '正常环境下仍能成功')
+	eq(res.trace.indexOf('ok') >= 0, true, 'trace 记到 ok')
+})
+
+group('native-fs.js · 失败路径与降级')
+
+await withPlus({ sdk: 28 }, async () => {
+	const res = await saveToDownloads('x', 'a.json')
+	eq(res.unsupported, true, 'Android 10 以下标为不支持（不报错）')
+})
+
+await withPlus({ insertNull: true }, async () => {
+	const res = await saveToDownloads('x', 'a.json')
+	eq(res.ok, false, 'insert 返回空 → 失败')
+	ok(String(res.error).indexOf('拒绝') >= 0, `给出可读原因：${res.error}`)
+})
+
+await withPlus({ openNull: true }, async (env) => {
+	const res = await saveToDownloads('x', 'a.json')
+	eq(res.ok, false, 'openOutputStream 返回空 → 失败')
+	eq(env.files.size, 0, '★ 失败时把刚建的空文件删掉了（不留 0 字节垃圾）')
+})
+
+await withPlus({ writerThrows: true }, async (env) => {
+	const res = await saveToDownloads('hello', 'c.json')
+	eq(res.ok, true, '★ OutputStreamWriter 失败时退回 getBytes 写法')
+	eq(res.trace.indexOf('getBytes') >= 0, true, `trace 显示换了写法：${res.trace}`)
+	// getBytes 走的是 byte[]，内容由 mock 标记，能看出确实走了第二条路
+	eq([...env.files.values()][0].text, '<bytes>', '确实走了 getBytes 那条路')
+})
+
+await withPlus({ writerThrows: true, writeThrows: true }, async () => {
+	const res = await saveToDownloads('x', 'd.json')
+	eq(res.ok, false, '两条写法都失败 → 失败')
+	ok(
+		String(res.error).indexOf('Writer') >= 0 && String(res.error).indexOf('getBytes') >= 0,
+		`★ 两种写法的错都报出来：${res.error}`
+	)
+})
+
+await withPlus({ importNullFor: 'android.provider.MediaStore$Downloads' }, async () => {
+	const res = await saveToDownloads('x', 'e.json')
+	eq(res.ok, false, 'importClass 返回空 → 失败')
+	ok(String(res.error).indexOf('基座') >= 0, `提示基座可能没链入：${res.error}`)
+})
+
+group('native-fs.js · 能力探测')
+
+await withPlus({ sdk: 36 }, async () => {
+	const p = probe()
+	eq(p.isAndroid, true, '识别为 Android')
+	eq(p.sdk, 36, '读到 SDK 级别')
+	eq(p.canSaveToDownloads, true, 'API 36 判断为可用')
+	eq(p.canShare, false, 'Node 里没有 uni.shareWithSystem → 分享不可用')
+})
+
+await withPlus({ sdk: 28 }, async () => {
+	eq(probe().canSaveToDownloads, false, 'API 28 判断为不可用')
+})
+
+eq(isAndroid(), false, '没有 plus 时 isAndroid 为 false')
+
+eq((await saveToDownloads('x', 'y.json')).unsupported, true, '没有 plus 时直接标不支持')
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${pass} 项，失败 ${fail} 项`)
