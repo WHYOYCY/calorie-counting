@@ -1738,12 +1738,29 @@ ok(
  * 这样才能验出「写进去的是不是原样」以及「空文件能不能被发现」。
  */
 function fakeMediaStore(opts = {}) {
+	// MediaStore 文档：url -> { name, bytes }
 	const docs = new Map()
+	// 普通文件：path -> { bytes }
+	const files = new Map()
 	const dirs = new Set()
 	let seq = 0
 
+	/** 取某个句柄对应的字节容器（MediaStore 文档或普通文件） */
+	const boxOf = (h) => {
+		if (!h) return null
+		if (h.url) return docs.get(h.url) || null
+		if (h.path) return files.get(h.path) || null
+		return null
+	}
+	const push = (h, bytes) => {
+		const box = boxOf(h)
+		if (!box) return
+		if (opts.dropWrites) return // 模拟真机：不报错但一个字节都没写进去
+		for (let i = 0; i < bytes.length; i++) box.bytes.push(bytes[i])
+	}
+
 	const impl = {
-		// 忠实地按 ISO-8859-1 编码：每个码点 → 一个字节
+		// invoke 会把接收者对象作为第一个参数传进来
 		jstring: {
 			getBytes: (o) => {
 				const s = o.s
@@ -1753,12 +1770,11 @@ function fakeMediaStore(opts = {}) {
 			},
 		},
 		activity: { getContentResolver: () => ({ _kind: 'resolver' }) },
-		// 注意：invoke 会把接收者对象作为第一个参数传进来（与 jstring/os/is 一致）
 		resolver: {
 			insert: (self, uri, values) => {
 				if (opts.insertNull) return null
 				const url = 'content://downloads/' + ++seq
-				docs.set(url, { name: values.vals._display_name, bytes: [], dropped: !!opts.dropWrites })
+				docs.set(url, { name: values.vals._display_name, bytes: [] })
 				return { _kind: 'uri', url }
 			},
 			openOutputStream: (self, uri) => {
@@ -1786,29 +1802,22 @@ function fakeMediaStore(opts = {}) {
 			getLong: (o) => o.size,
 			close: () => {},
 		},
-		os: {
-			write: (o, bytes) => {
-				const d = docs.get(o.url)
-				if (!d) return
-				// dropWrites 模拟真机上那个「不报错但一个字节都没写进去」的情况
-				if (d.dropped) return
-				for (let i = 0; i < bytes.length; i++) d.bytes.push(bytes[i])
+		os: { write: (o, bytes) => push(o, bytes), flush: () => {}, close: () => {} },
+		fos: { write: (o, bytes) => push(o, bytes), flush: () => {}, close: () => {} },
+		writer: {
+			// 按 ISO-8859-1 写：每个码点恰好一个字节
+			write: (o, text) => {
+				const n = text.length
+				const out = new Uint8Array(n)
+				for (let i = 0; i < n; i++) out[i] = text.charCodeAt(i) & 0xff
+				push(o.os, out)
 			},
 			flush: () => {},
 			close: () => {},
 		},
 		is: {
-			available: (o) => (docs.get(o.url) ? docs.get(o.url).bytes.length : 0),
-			readAllBytes: (o) => Uint8Array.from(docs.get(o.url).bytes),
-			close: () => {},
-		},
-		fos: {
-			write: (o, bytes) => {
-				const list = docs.get(o.path) || []
-				for (let i = 0; i < bytes.length; i++) list.push(bytes[i])
-				docs.set(o.path, list)
-			},
-			flush: () => {},
+			available: (o) => (boxOf(o) ? boxOf(o).bytes.length : 0),
+			readAllBytes: (o) => Uint8Array.from(boxOf(o).bytes),
 			close: () => {},
 		},
 		file: {
@@ -1817,6 +1826,7 @@ function fakeMediaStore(opts = {}) {
 				dirs.add(o.path)
 				return true
 			},
+			length: (o) => (files.get(o.path) ? files.get(o.path).bytes.length : 0),
 		},
 	}
 
@@ -1836,6 +1846,7 @@ function fakeMediaStore(opts = {}) {
 				this.vals[k] = v
 			}
 		},
+		'android.provider.MediaStore$MediaColumns': { SIZE: '_size' },
 		'android.provider.MediaStore$Downloads': {
 			DISPLAY_NAME: '_display_name',
 			MIME_TYPE: 'mime_type',
@@ -1844,8 +1855,14 @@ function fakeMediaStore(opts = {}) {
 		},
 		'java.io.FileOutputStream': function FileOutputStream(p) {
 			if (opts.openOutThrows) throw new Error('打不开文件')
-			if (!docs.has(p)) docs.set(p, [])
+			if (!files.has(p)) files.set(p, { bytes: [] })
 			return { _kind: 'fos', path: p }
+		},
+		'java.io.OutputStreamWriter': function OutputStreamWriter(os, enc) {
+			// 这是「写法一」，也是预期在真机上能用的那种。
+			// writerThrows 用来验「写法一挂了能不能退到写法二」。
+			if (opts.writerThrows) throw new Error('OutputStreamWriter 不可用')
+			return { _kind: 'writer', os, enc }
 		},
 		'java.io.File': function File(p) {
 			return { _kind: 'file', path: p }
@@ -1869,7 +1886,14 @@ function fakeMediaStore(opts = {}) {
 		runtimeMainActivity: () => ({ _kind: 'activity' }),
 	}
 
-	return { plus: { android }, docs, dirs, firstUri: () => 'content://downloads/1' }
+	return {
+		plus: { android, io: { convertLocalFileSystemURL: (u) => 'ABS:/' + String(u) } },
+		docs,
+		files,
+		dirs,
+		firstUri: () => 'content://downloads/1',
+		uriOf: (n) => 'content://downloads/' + n,
+	}
 }
 
 const withMediaStore = async (opts, fn) => {
@@ -1907,8 +1931,12 @@ await withMediaStore({ dropWrites: true }, async (env) => {
 	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'bak.zip')
 	eq(res.ok, false, '★ 一个字节都没写进去 → 报失败，而不是默默当成功')
 	ok(
-		String(res.error).indexOf('大小不对') >= 0 && String(res.error).indexOf('0 字节') >= 0,
+		String(res.error).indexOf('实际只有 0 字节') >= 0,
 		`★ 直接说出「写了多少、实际多少」：${res.error}`
+	)
+	ok(
+		String(res.error).indexOf('writer-iso') >= 0 && String(res.error).indexOf('bytes') >= 0,
+		`★ 两种写法的失败原因都报出来（能看出不是所有路都试过了）：${res.error}`
 	)
 	eq(env.docs.size, 0, '★ 失败时把那个空文件删掉了')
 })
@@ -1922,6 +1950,25 @@ await withMediaStore({ openOutNull: true }, async (env) => {
 	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'a.zip')
 	eq(res.ok, false, 'openOutputStream 返回空 → 失败')
 	eq(env.docs.size, 0, '失败时清理了空文件')
+})
+
+group('native-fs.js · 写法一挂了要能退到写法二')
+
+await withMediaStore({ writerThrows: true }, async (env) => {
+	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'fb.zip')
+	eq(res.ok, true, '★ OutputStreamWriter 不可用时退回 byte[] 写法，仍然成功')
+	eq(res.method, 'bytes', `实际用的是：${res.method}`)
+	const doc = [...env.docs.values()].find((d) => d.name === 'fb.zip')
+	eq(doc.bytes.length, 256, '内容完整')
+	eq(doc.bytes[0], 0, '首字节对')
+	eq(doc.bytes[255], 255, '末字节对')
+})
+
+// 写法一（预期真机可用）单独验一遍
+await withMediaStore({}, async (env) => {
+	const res = await NFS.writeBytesToDownloads(ALL_BYTES, 'w1.zip')
+	eq(res.ok, true, '写法一可用时成功')
+	eq(res.method, 'writer-iso', `默认用写法一：${res.method}`)
 })
 
 group('native-fs.js · 从 SAF 读回（全程原生）')
