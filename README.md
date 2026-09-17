@@ -26,6 +26,15 @@
 - **备份与后悔药** —— 清空记录或覆盖导入前会自动在本机留一份快照（保留最近 3 份，可一键回滚）；
   （照片导出暂时下掉了，原因与后续计划见「待优化」）
 
+## 下载
+
+直接装 APK（Android 10+，15 MB）：
+
+**[⬇ 下载 v1.0.1](https://github.com/WHYOYCY/calorie-counting/releases/latest)** ·
+[全部版本](https://github.com/WHYOYCY/calorie-counting/releases)
+
+与上一版使用同一签名，可直接覆盖升级。
+
 ## 快速开始
 
 ```bash
