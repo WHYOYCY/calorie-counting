@@ -1967,7 +1967,7 @@ group('stats.js · 打卡热力图')
 	const emptyH = heatmap([], { weeks: 2, endKey: '2026-09-16', goal: 1800 })
 	eq(emptyH.cells.length, 2, '空数据也有 2 列')
 	eq(emptyH.cells.reduce((a, x) => a.concat(x), []).every((x) => x.level === 0), true, '空数据全是 0 挡')
-	eq(heatmap([], {}) .cells.length, 26, '不给参数时默认 26 周')
+	eq(heatmap([], {}).cells.length, 13, '不给参数时默认 13 周（一个季度）')
 }
 
 group('color.js · 从数据色算出胶囊配色')

@@ -300,13 +300,15 @@ const rangeSub = computed(() => {
 /* ---------------- 打卡热力图 ---------------- */
 
 const LEVELS = [0, 1, 2, 3, 4]
-const HEAT_WEEKS = 26
+const HEAT_WEEKS = 13
 
 /** 选中哪一天（空字符串 = 没选） */
 const picked = ref('')
 
 /**
- * 热力图固定看最近 26 周，不跟上面的日/周/月切换走 ——
+ * 热力图固定看最近 13 周（一个季度），不跟上面的日/周/月切换走 ——
+ * 列数少一半，格子大一倍：真机上 26 列时每格只有 9~13px，14 列约 20~27px，
+ * 手指点得准，五档深浅也看得清。
  * 「打卡」本来就是长期视角，跟着切反而看不出规律。
  * 依赖 goal（来自 settings）以便 onShow 刷新后重算。
  */
@@ -612,18 +614,21 @@ function tapBar(b) {
 		display: flex;
 	}
 
+	/* 行标签用「7 等分」对齐格子，而不是写死高度 ——
+	   格子大小会随周数和屏幕宽度变，写死高度一改周数就错位 */
 	.hm-days {
 		width: 34rpx;
 		flex-shrink: 0;
+		display: flex;
+		flex-direction: column;
 	}
 
 	.hm-day {
-		display: block;
+		flex: 1;
+		display: flex;
+		align-items: center;
 		font-size: 17rpx;
 		color: $c-text-mute;
-		/* 与格子同高：20rpx 格子 + 3rpx 间隔 */
-		height: 23rpx;
-		line-height: 23rpx;
 	}
 
 	.hm-day.hide {
@@ -639,7 +644,7 @@ function tapBar(b) {
 	.hm-col {
 		flex: 1;
 		min-width: 0;
-		padding-right: 3rpx;
+		padding-right: 4rpx;
 	}
 
 	/* 正方形格子：用 padding-bottom 撑高度（比 aspect-ratio 兼容性稳） */
@@ -647,8 +652,14 @@ function tapBar(b) {
 		width: 100%;
 		height: 0;
 		padding-bottom: 100%;
-		border-radius: 3rpx;
-		margin-bottom: 3rpx;
+		border-radius: 5rpx;
+		margin-bottom: 4rpx;
+	}
+
+	/* 最后一行的格子不要底部间隔：多出来的那几像素会让整列偏高，
+	   行标签就对不齐了（标签是 7 等分，格子是「格子 + 间隔」） */
+	.hm-col .hm-cell:last-child {
+		margin-bottom: 0;
 	}
 
 	/* 五档深浅：同一色相从浅到深，一眼看出吃多吃少 */
@@ -695,10 +706,11 @@ function tapBar(b) {
 	}
 
 	.hm-mini {
-		width: 22rpx;
-		height: 22rpx;
+		width: 26rpx;
+		height: 26rpx;
 		padding-bottom: 0;
-		margin: 0 4rpx;
+		margin: 0 5rpx;
+		border-radius: 5rpx;
 	}
 
 	.hm-foot-hint {

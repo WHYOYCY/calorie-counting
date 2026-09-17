@@ -174,7 +174,7 @@ export function intakeLevel(kcal, goal = 0) {
  * 打卡热力图的数据：按周分列，每列 7 天（周一到周日）。
  *
  * @param records 记录数组（至少覆盖这段时间）
- * @param weeks   显示多少周，默认 26（半年）
+ * @param weeks   显示多少周，默认 13（一个季度；列少一倍、格子大一倍）
  * @param endKey  最后一天（通常是今天），它所在的那一列是最后一列
  * @param goal    每日目标
  * @returns { weeks, cells: 二维数组 [列][行], months: 每列对应的月份标签 }
@@ -182,8 +182,8 @@ export function intakeLevel(kcal, goal = 0) {
  * 未来日期（本列中今天之后的日子）标 future=true，渲染成空白，
  * 不画成「没记录」—— 那会让人误以为你那天没打卡。
  */
-export function heatmap(records, { weeks = 26, endKey, goal = 0 } = {}) {
-	const n = Math.max(1, Number(weeks) || 26)
+export function heatmap(records, { weeks = 13, endKey, goal = 0 } = {}) {
+	const n = Math.max(1, Number(weeks) || 13)
 	const last = endKey || ''
 	// 最后一列 = endKey 所在周的周一；第一列再往前推 n-1 周
 	const lastMonday = startOfWeek(last)
