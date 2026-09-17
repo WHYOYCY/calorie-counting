@@ -27,33 +27,9 @@
 			</view>
 		</view>
 
-		<!-- 汇总：大数字 + 达标率环 -->
+		<!-- 汇总：只留三个关键指标（总摄入已经去掉，看下面的热力图与图表） -->
 		<view class="card">
-			<view class="sum-top">
-				<view class="grow">
-					<text class="kicker">总摄入</text>
-					<view class="hero">
-						<text class="hero-num num">{{ groupDigits(round(summary.totals.kcal, 0)) }}</text>
-						<text class="hero-unit">kcal</text>
-					</view>
-					<text v-if="summary.activeDays" class="hero-sub">
-						共 {{ summary.dayCount }} 天 · 有记录 {{ summary.activeDays }} 天
-					</text>
-				</view>
-				<view v-if="summary.activeDays" class="ring" :style="{ background: ringBg }">
-					<view class="ring-in">
-						<text class="ring-v num" :class="ringTone">{{ summary.goalRate }}<text class="ring-suf">%</text></text>
-						<text class="ring-k">达标率</text>
-					</view>
-				</view>
-			</view>
-
-			<!-- 三个次要指标：等宽格子，横向对齐 -->
 			<view class="tiles">
-				<view class="tile">
-					<text class="tile-v num">{{ groupDigits(summary.avgPerActiveDay) }}</text>
-					<text class="tile-k">日均 kcal</text>
-				</view>
 				<view class="tile">
 					<text class="tile-v num">{{ summary.activeDays }}</text>
 					<text class="tile-k">有记录天数</text>
@@ -64,19 +40,64 @@
 					</text>
 					<text class="tile-k">超出目标</text>
 				</view>
+				<view class="tile">
+					<text
+						class="tile-v num"
+						:class="{ warn: summary.activeDays && summary.goalRate < 60 }"
+					>
+						{{ summary.goalRate }}<text class="tile-suf">%</text>
+					</text>
+					<text class="tile-k">达标率</text>
+				</view>
+			</view>
+			<text v-if="summary.activeDays" class="tile-note">
+				达标率 = 有记录的天里，没超过 {{ groupDigits(goal) }} kcal 的比例
+			</text>
+		</view>
+
+		<!-- 打卡热力图：一列一周，七行是周一到周日 -->
+		<view class="card">
+			<view class="between card-head">
+				<text class="kicker">打卡热力图</text>
+				<text class="t-xs t-mute">最近 {{ heat.weeks }} 周</text>
 			</view>
 
-			<!-- 营养素胶囊：浅底深字，一眼区分三种 -->
-			<view class="pills">
-				<view
-					v-for="m in macroLine"
-					:key="m.key"
-					class="mpill"
-					:style="{ background: m.soft, color: m.deep }"
-				>
-					<text class="mpill-t">{{ m.label }}</text>
-					<text class="mpill-v num">{{ m.value }}g</text>
+			<view class="hm">
+				<view class="hm-labels">
+					<text class="hm-month" v-for="(m, i) in heat.months" :key="i">
+						{{ i === 0 || m !== heat.months[i - 1] ? m + '月' : '' }}
+					</text>
 				</view>
+				<view class="hm-main">
+					<view class="hm-days">
+						<text
+							v-for="(d, i) in WEEK_SHORT"
+							:key="i"
+							class="hm-day"
+							:class="{ hide: i % 2 === 1 }"
+						>
+							{{ d }}
+						</text>
+					</view>
+					<view class="hm-grid">
+						<view class="hm-col" v-for="(col, ci) in heat.cells" :key="ci">
+							<view
+								v-for="cell in col"
+								:key="cell.date"
+								class="hm-cell"
+								:class="['lv' + cell.level, { future: cell.future, on: cell.date === picked }]"
+								@click="tapDay(cell)"
+							></view>
+						</view>
+					</view>
+				</view>
+			</view>
+
+			<view class="hm-foot">
+				<text class="hm-foot-t">少</text>
+				<view v-for="l in LEVELS" :key="l" class="hm-cell hm-mini" :class="'lv' + l"></view>
+				<text class="hm-foot-t">多</text>
+				<text class="hm-foot-hint">点格子看当天吃了什么</text>
 			</view>
 		</view>
 
@@ -166,6 +187,50 @@
 			<view v-else class="empty">这个区间还没有记录</view>
 		</view>
 	</view>
+
+	<!-- 当天详情：点热力图格子后弹出 -->
+	<view v-if="picked" class="mask" @click="closeDay">
+		<view class="dialog" @click.stop>
+			<view class="between">
+				<text class="dialog-title">{{ pickedLabel }}</text>
+				<text class="t-xs t-mute">{{ day.count }} 条记录</text>
+			</view>
+
+			<view class="dd-top">
+				<text class="dd-v num">{{ groupDigits(day.kcal) }}</text>
+				<text class="dd-u">kcal</text>
+				<text v-if="goal > 0" class="dd-goal">/ {{ groupDigits(goal) }}</text>
+				<text class="dd-badge" :class="day.tone">{{ day.badge }}</text>
+			</view>
+
+			<view class="dd-macros">
+				<view
+					v-for="m in day.macros"
+					:key="m.key"
+					class="dd-m"
+					:style="{ background: m.soft, color: m.deep }"
+				>
+					<text class="dd-m-t">{{ m.label }}</text>
+					<text class="dd-m-v num">{{ m.value }}g</text>
+				</view>
+			</view>
+
+			<view class="dd-meals" v-if="day.meals.length">
+				<view class="dd-meal" v-for="m in day.meals" :key="m.key">
+					<text class="dd-meal-t">{{ m.label }}</text>
+					<text class="dd-meal-v num">{{ groupDigits(m.kcal) }} kcal</text>
+				</view>
+			</view>
+			<text v-else class="dd-empty">这一天没有记录</text>
+
+			<text v-if="day.foods.length" class="dd-foods">{{ day.foods.join(' · ') }}</text>
+
+			<view class="row-btns">
+				<view v-if="day.count" class="btn btn-plain grow" @click="openThisDay">看这一天</view>
+				<view class="btn btn-plain grow" @click="closeDay">关闭</view>
+			</view>
+		</view>
+	</view>
 </template>
 
 <script setup>
@@ -183,10 +248,10 @@ import {
 	startOfWeek,
 	todayKey,
 } from '../../core/date.js'
-import { getSettings, recordsInRange } from '../../core/db.js'
+import { allRecords, getSettings, recordsByDate, recordsInRange } from '../../core/db.js'
 import { withAlpha, darken } from '../../core/color.js'
-import { groupDigits, percent, round } from '../../core/nutrition.js'
-import { mealBreakdown, rangeSummary, topFoods } from '../../core/stats.js'
+import { groupDigits, percent, round, sumRecords } from '../../core/nutrition.js'
+import { heatmap, mealBreakdown, rangeSummary, topFoods } from '../../core/stats.js'
 
 const MODES = [
 	{ key: 'day', label: '日' },
@@ -232,33 +297,87 @@ const rangeSub = computed(() => {
 	return `${d.getFullYear()}年 · 共 ${summary.value.dayCount} 天`
 })
 
-const macroLine = computed(() => {
-	const t = summary.value.totals
-	return MACRO_META.map((m) => ({
-		...m,
-		value: t[m.key] || 0,
-		// 浅底深字：底色是同色相的低透明度，文字压暗保证对比度
-		soft: withAlpha(m.color, 0.16),
-		deep: darken(m.color, 0.42),
-	}))
-})
+/* ---------------- 打卡热力图 ---------------- */
+
+const LEVELS = [0, 1, 2, 3, 4]
+const HEAT_WEEKS = 26
+
+/** 选中哪一天（空字符串 = 没选） */
+const picked = ref('')
 
 /**
- * 达标率环：用 conic-gradient 画，不需要 canvas。
- * 底色先铺一层同色的浅色（这样即使 conic-gradient 不被支持，
- * 也是一个完整的浅色环，不会变成一块空白）。
+ * 热力图固定看最近 26 周，不跟上面的日/周/月切换走 ——
+ * 「打卡」本来就是长期视角，跟着切反而看不出规律。
+ * 依赖 goal（来自 settings）以便 onShow 刷新后重算。
  */
-const ringColor = computed(() => {
-	if (!summary.value.activeDays) return '#dfe5ea'
-	return summary.value.goalRate >= 60 ? '#52a98a' : '#d9a45b'
+const heat = computed(() => {
+	void goal.value
+	return heatmap(allRecords(), {
+		weeks: HEAT_WEEKS,
+		endKey: todayKey(),
+		goal: goal.value,
+	})
 })
 
-const ringTone = computed(() => (summary.value.goalRate >= 60 ? '' : 'warn'))
+const pickedLabel = computed(() => (picked.value ? dateLabel(picked.value) : ''))
 
-const ringBg = computed(() => {
-	const p = Math.max(0, Math.min(100, Number(summary.value.goalRate) || 0))
-	return `conic-gradient(${ringColor.value} 0 ${p}%, ${withAlpha(ringColor.value, 0.18)} ${p}% 100%)`
+/** 点开的那一天的明细（缩略图里的全部内容都从这里来） */
+const day = computed(() => {
+	const key = picked.value
+	const list = key ? recordsByDate(key) : []
+	const t = sumRecords(list)
+	const kcal = round(t.kcal, 0)
+	const g = goal.value
+	let tone = 'none'
+	let badge = '还没有记录'
+	if (list.length) {
+		if (g > 0 && kcal > g) {
+			tone = 'over'
+			badge = `超出 ${round(kcal - g, 0)}`
+		} else if (g > 0 && kcal < g * 0.5) {
+			tone = 'low'
+			badge = '偏少'
+		} else {
+			tone = 'ok'
+			badge = g > 0 ? `还剩 ${round(g - kcal, 0)}` : '已记录'
+		}
+	}
+	return {
+		kcal,
+		count: list.length,
+		tone,
+		badge,
+		macros: MACRO_META.map((m) => ({
+			...m,
+			value: round(t[m.key] || 0, 1),
+			soft: withAlpha(m.color, 0.16),
+			deep: darken(m.color, 0.42),
+		})),
+		meals: mealBreakdown(list)
+			.filter((m) => m.count > 0)
+			.map((m) => ({ key: m.key, label: m.label, kcal: round(m.totals.kcal, 0) })),
+		foods: topFoods(list, 8).map((f) => f.name),
+	}
 })
+
+function tapDay(cell) {
+	// 未来的日子是空的，点了没意义
+	if (!cell || cell.future) return
+	picked.value = picked.value === cell.date ? '' : cell.date
+}
+
+function closeDay() {
+	picked.value = ''
+}
+
+/** 跳到「日」视图看这一天的完整列表 */
+function openThisDay() {
+	if (!picked.value) return
+	mode.value = 'day'
+	anchor.value = picked.value
+	picked.value = ''
+	uni.pageScrollTo({ scrollTop: 0, duration: 200 })
+}
 
 /**
  * 柱状图刻度上限把「目标线」也算进去，
@@ -418,91 +537,13 @@ function tapBar(b) {
 	}
 
 	.card-head {
-		margin-bottom: $s-4;
+		margin-bottom: $s-3;
 	}
 
-	.sum-top {
-		display: flex;
-		align-items: center;
-	}
-
-	.hero {
-		display: flex;
-		align-items: baseline;
-		margin-top: 4rpx;
-	}
-
-	/* 展示级大数字：主色 + 半粗，配细字重的字体显得稳而不重 */
-	.hero-num {
-		font-family: $ff-num;
-		font-size: 88rpx;
-		font-weight: 600;
-		line-height: 1.02;
-		letter-spacing: -2rpx;
-		color: $c-primary-dark;
-	}
-
-	.hero-unit {
-		font-size: 24rpx;
-		color: $c-text-mute;
-		margin-left: 10rpx;
-	}
-
-	.hero-sub {
-		display: block;
-		font-size: 21rpx;
-		color: $c-text-mute;
-		margin-top: 6rpx;
-	}
-
-	/* ---------- 达标率环 ---------- */
-	.ring {
-		width: 148rpx;
-		height: 148rpx;
-		border-radius: $r-pill;
-		padding: 15rpx;
-		margin-left: $s-4;
-		flex-shrink: 0;
-	}
-
-	.ring-in {
-		width: 100%;
-		height: 100%;
-		border-radius: $r-pill;
-		background: #fff;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.ring-v {
-		font-size: 38rpx;
-		font-weight: 600;
-		line-height: 1.1;
-		color: $c-primary-dark;
-	}
-
-	.ring-v.warn {
-		color: $c-warn;
-	}
-
-	.ring-suf {
-		font-size: 20rpx;
-		font-weight: 400;
-		margin-left: 1rpx;
-	}
-
-	.ring-k {
-		font-size: 19rpx;
-		color: $c-text-mute;
-		margin-top: 1rpx;
-	}
-
-	/* ---------- 次要指标格子 ---------- */
+	/* 三个关键指标：等宽格子，横向对齐 */
 	.tiles {
 		display: flex;
-		margin-top: $s-4;
+		margin-top: $s-3;
 	}
 
 	.tile {
@@ -510,7 +551,7 @@ function tapBar(b) {
 		min-width: 0;
 		background: $c-fill;
 		border-radius: $r-sm;
-		padding: 14rpx 6rpx;
+		padding: 20rpx 6rpx;
 		text-align: center;
 	}
 
@@ -520,51 +561,309 @@ function tapBar(b) {
 
 	.tile-v {
 		display: block;
-		font-size: 34rpx;
+		font-size: 46rpx;
 		font-weight: 600;
-		line-height: 1.2;
+		line-height: 1.15;
 	}
 
 	.tile-v.warn {
 		color: $c-danger;
 	}
 
+	.tile-suf {
+		font-size: 22rpx;
+		font-weight: 400;
+		color: $c-text-mute;
+		margin-left: 2rpx;
+	}
+
 	.tile-k {
 		display: block;
-		font-size: 20rpx;
+		font-size: 21rpx;
 		color: $c-text-mute;
-		margin-top: 2rpx;
+		margin-top: 4rpx;
 	}
 
-	/* ---------- 营养素胶囊 ---------- */
-	.pills {
-		display: flex;
+	.tile-note {
+		display: block;
+		font-size: 19rpx;
+		color: $c-text-mute;
 		margin-top: $s-3;
+		line-height: 1.5;
 	}
 
-	.mpill {
+	/* ---------- 打卡热力图 ---------- */
+	.hm-labels {
+		display: flex;
+		padding-left: 34rpx;
+		height: 26rpx;
+	}
+
+	.hm-month {
+		flex: 1;
+		min-width: 0;
+		font-size: 17rpx;
+		color: $c-text-mute;
+		overflow: visible;
+		white-space: nowrap;
+	}
+
+	.hm-main {
+		display: flex;
+	}
+
+	.hm-days {
+		width: 34rpx;
+		flex-shrink: 0;
+	}
+
+	.hm-day {
+		display: block;
+		font-size: 17rpx;
+		color: $c-text-mute;
+		/* 与格子同高：20rpx 格子 + 3rpx 间隔 */
+		height: 23rpx;
+		line-height: 23rpx;
+	}
+
+	.hm-day.hide {
+		color: transparent;
+	}
+
+	.hm-grid {
+		flex: 1;
+		display: flex;
+		min-width: 0;
+	}
+
+	.hm-col {
+		flex: 1;
+		min-width: 0;
+		padding-right: 3rpx;
+	}
+
+	/* 正方形格子：用 padding-bottom 撑高度（比 aspect-ratio 兼容性稳） */
+	.hm-cell {
+		width: 100%;
+		height: 0;
+		padding-bottom: 100%;
+		border-radius: 3rpx;
+		margin-bottom: 3rpx;
+	}
+
+	/* 五档深浅：同一色相从浅到深，一眼看出吃多吃少 */
+	.hm-cell.lv0 {
+		background: $c-fill;
+	}
+
+	.hm-cell.lv1 {
+		background: #e0ebe6;
+	}
+
+	.hm-cell.lv2 {
+		background: #bcd9cd;
+	}
+
+	.hm-cell.lv3 {
+		background: #8cc3ae;
+	}
+
+	.hm-cell.lv4 {
+		background: $c-primary;
+	}
+
+	/* 还没到的日子：留空，不画成「没记录」 */
+	.hm-cell.future {
+		background: transparent;
+	}
+
+	/* 选中的那一格：描一圈深色，位置一眼能找到 */
+	.hm-cell.on {
+		box-shadow: 0 0 0 2rpx $c-text, 0 0 0 4rpx #fff;
+	}
+
+	.hm-foot {
+		display: flex;
+		align-items: center;
+		margin-top: $s-3;
+		padding-left: 34rpx;
+	}
+
+	.hm-foot-t {
+		font-size: 18rpx;
+		color: $c-text-mute;
+	}
+
+	.hm-mini {
+		width: 22rpx;
+		height: 22rpx;
+		padding-bottom: 0;
+		margin: 0 4rpx;
+	}
+
+	.hm-foot-hint {
+		font-size: 18rpx;
+		color: $c-text-mute;
+		margin-left: auto;
+	}
+
+	/* ---------- 当天详情弹层 ---------- */
+	.mask {
+		position: fixed;
+		left: 0;
+		right: 0;
+		top: 0;
+		bottom: 0;
+		background: rgba(22, 32, 42, 0.45);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: $s-4;
+		z-index: 99;
+	}
+
+	.dialog {
+		width: 100%;
+		background: #fff;
+		border-radius: $r-lg;
+		padding: $s-4;
+		box-shadow: $sh-3;
+	}
+
+	.dialog-title {
+		display: block;
+		font-size: 32rpx;
+		font-weight: 600;
+		margin-bottom: 2rpx;
+	}
+
+	.dd-top {
+		display: flex;
+		align-items: baseline;
+		margin: $s-3 0 $s-3;
+	}
+
+	.dd-v {
+		font-family: $ff-num;
+		font-size: 56rpx;
+		font-weight: 600;
+		line-height: 1.05;
+		letter-spacing: -1rpx;
+		color: $c-primary-dark;
+	}
+
+	.dd-u {
+		font-size: 21rpx;
+		color: $c-text-mute;
+		margin-left: 8rpx;
+	}
+
+	.dd-goal {
+		font-family: $ff-num;
+		font-size: 22rpx;
+		color: $c-text-mute;
+		margin-left: 8rpx;
+	}
+
+	.dd-badge {
+		margin-left: auto;
+		font-size: 20rpx;
+		padding: 5rpx 16rpx;
+		border-radius: $r-pill;
+		background: $c-fill;
+		color: $c-text-sub;
+	}
+
+	.dd-badge.ok {
+		background: $c-primary-weak;
+		color: $c-primary-dark;
+	}
+
+	.dd-badge.over {
+		background: $c-danger-weak;
+		color: $c-danger;
+	}
+
+	.dd-badge.low {
+		background: #fbf3e6;
+		color: #9a7434;
+	}
+
+	.dd-macros {
+		display: flex;
+	}
+
+	.dd-m {
 		flex: 1;
 		min-width: 0;
 		display: flex;
 		align-items: baseline;
 		justify-content: center;
-		padding: 12rpx 8rpx;
+		padding: 12rpx 6rpx;
 		border-radius: $r-pill;
 	}
 
-	.mpill + .mpill {
+	.dd-m + .dd-m {
 		margin-left: $s-2;
 	}
 
-	.mpill-t {
-		font-size: 21rpx;
-		margin-right: 8rpx;
+	.dd-m-t {
+		font-size: 20rpx;
+		margin-right: 7rpx;
 		opacity: 0.85;
 	}
 
-	.mpill-v {
-		font-size: 25rpx;
+	.dd-m-v {
+		font-size: 24rpx;
 		font-weight: 600;
+	}
+
+	.dd-meals {
+		margin-top: $s-3;
+		border-top: 1rpx solid $c-line;
+		padding-top: $s-2;
+	}
+
+	.dd-meal {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 6rpx 0;
+	}
+
+	.dd-meal-t {
+		font-size: 24rpx;
+		color: $c-text-sub;
+	}
+
+	.dd-meal-v {
+		font-size: 24rpx;
+		font-weight: 600;
+	}
+
+	.dd-foods {
+		display: block;
+		font-size: 21rpx;
+		color: $c-text-mute;
+		margin-top: $s-2;
+		line-height: 1.5;
+	}
+
+	.dd-empty {
+		display: block;
+		font-size: 24rpx;
+		color: $c-text-mute;
+		padding: $s-4 0;
+		text-align: center;
+	}
+
+	.row-btns {
+		display: flex;
+		margin-top: $s-4;
+	}
+
+	.row-btns .btn + .btn {
+		margin-left: $s-2;
 	}
 
 	/* ---------- 图表 ---------- */

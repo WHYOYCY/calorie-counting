@@ -1898,6 +1898,78 @@ await withPlusIO({}, async () => {
 	eq(targets[0].visible, false, '私有目录标记为不可见（界面上会提示用分享）')
 })
 
+group('stats.js · 打卡热力图')
+
+{
+	const { intakeLevel, heatmap } = await import('../src/core/stats.js')
+
+	// 五挡按「占每日目标的比例」分，不是绝对值
+	eq(intakeLevel(0, 1800), 0, '没记录 = 第 0 挡（空）')
+	eq(intakeLevel(300, 1800), 1, '远低于目标 = 第 1 挡')
+	eq(intakeLevel(899, 1800), 1, '不到一半仍是第 1 挡')
+	eq(intakeLevel(900, 1800), 2, '刚好一半进第 2 挡')
+	eq(intakeLevel(1200, 1800), 2, '八成以下第 2 挡')
+	eq(intakeLevel(1440, 1800), 3, '接近目标第 3 挡')
+	eq(intakeLevel(1800, 1800), 4, '正好达标算最高挡')
+	eq(intakeLevel(2600, 1800), 4, '超标也是最高挡（热力图只表达吃多吃少）')
+	// 同一个热量，目标不同挡位不同 —— 这才是按比例分的意义
+	ok(intakeLevel(1200, 1800) !== intakeLevel(1200, 1400), '同样的 1200 kcal，目标不同挡位不同')
+	// 没设目标时不能把所有人算成同一挡
+	eq(intakeLevel(0, 0), 0, '没目标 + 没吃 = 0 挡')
+	eq(intakeLevel(200, 0), 1, '没目标时退化成固定阈值')
+	eq(intakeLevel(1000, 0), 3, '没目标时 1000 是第 3 挡')
+	eq(intakeLevel(NaN, 1800), 0, '坏数据当 0 处理，不炸')
+
+	const day = (d, kcal) => ({
+		date: d,
+		items: [{ grams: 100, per100: { kcal: kcal, protein: 0, fat: 0, carbs: 0 } }],
+	})
+
+	// 2026-09-16 是周三
+	const h = heatmap([day('2026-09-14', 900), day('2026-09-16', 1800)], {
+		weeks: 4,
+		endKey: '2026-09-16',
+		goal: 1800,
+	})
+	eq(h.cells.length, 4, '4 周 = 4 列')
+	eq(h.cells.every((c) => c.length === 7), true, '每列 7 天')
+	eq(h.from, '2026-08-24', '起点是 4 周前的周一')
+	eq(h.to, '2026-09-20', '终点是本周周日')
+	eq(h.cells[0][0].date, '2026-08-24', '第一列第一格是周一')
+	eq(h.cells[0][6].date, '2026-08-30', '第一列最后一格是周日')
+	eq(h.cells[3][0].date, '2026-09-14', '最后一列从周一开始')
+
+	const flat = h.cells.reduce((a, c) => a.concat(c), [])
+	eq(flat.length, 28, '4 周共 28 格')
+	eq(flat.filter((c) => c.future).map((c) => c.date).join(','), '2026-09-17,2026-09-18,2026-09-19,2026-09-20', '今天之后的格子标为未来')
+	eq(flat.find((c) => c.date === '2026-09-14').level, 2, '900/1800 = 一半 → 第 2 挡')
+	eq(flat.find((c) => c.date === '2026-09-16').level, 4, '1800/1800 → 第 4 挡')
+	eq(flat.find((c) => c.date === '2026-09-15').level, 0, '没记录的日子是 0 挡')
+	eq(flat.filter((c) => c.count > 0).length, 2, '只有两天有记录')
+	// 未来的格子即使有数据也不该当成「已打卡」显示（数据异常时也不能骗人）
+	eq(flat.find((c) => c.date === '2026-09-18').level, 0, '未来格子不参与挡位')
+
+	// 同一天多条记录要合计
+	const two = heatmap([day('2026-09-14', 400), day('2026-09-14', 500)], {
+		weeks: 1,
+		endKey: '2026-09-16',
+		goal: 1800,
+	})
+	const c = two.cells[0][0]
+	eq(c.kcal, 900, '同一天两条记录合计 900')
+	eq(c.count, 2, '条数也对')
+
+	// 月份标签：周一时所属月份，用于上面那行月标
+	eq(h.months.length, 4, '月份标签和列数一致')
+	eq(h.months[3], 9, '最后一列的月份是 9')
+
+	// 空数据不能炸
+	const emptyH = heatmap([], { weeks: 2, endKey: '2026-09-16', goal: 1800 })
+	eq(emptyH.cells.length, 2, '空数据也有 2 列')
+	eq(emptyH.cells.reduce((a, x) => a.concat(x), []).every((x) => x.level === 0), true, '空数据全是 0 挡')
+	eq(heatmap([], {}) .cells.length, 26, '不给参数时默认 26 周')
+}
+
 group('color.js · 从数据色算出胶囊配色')
 
 {
