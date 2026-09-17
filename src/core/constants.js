@@ -43,12 +43,31 @@ export const MACRO_META = [
 	{ key: 'carbs', label: '碳水', unit: 'g', color: '#b5a6e0' },
 ]
 
-/** 可选视觉模型 */
+/** 应用版本（界面上只显示这一处，避免各页面各写一个数字） */
+export const APP_VERSION = '1.0.1'
+
+/**
+ * 可选视觉模型。
+ *
+ * plain 是给普通用户看的说法（「快速识别」比 qwen3-vl-flash 好懂），
+ * 具体模型名只在二级设置页里以小字出现 —— 那是给要排查问题的人看的。
+ */
 export const MODELS = [
-	{ id: 'qwen3-vl-flash', label: 'qwen3-vl-flash', hint: '快 · 省（推荐）' },
-	{ id: 'qwen3-vl-plus', label: 'qwen3-vl-plus', hint: '准 · 贵' },
-	{ id: 'qwen-vl-max', label: 'qwen-vl-max', hint: '经典款' },
+	{
+		id: 'qwen3-vl-flash',
+		plain: '快速识别',
+		label: 'qwen3-vl-flash',
+		hint: '最快、最省，日常够用（推荐）',
+	},
+	{ id: 'qwen3-vl-plus', plain: '精细识别', label: 'qwen3-vl-plus', hint: '更准一些，也贵一些' },
+	{ id: 'qwen-vl-max', plain: '经典识别', label: 'qwen-vl-max', hint: '上一代旗舰，兼容旧配置' },
 ]
+
+/** 把模型 id 说成人话（找不到就退回 id 本身） */
+export function modelPlain(id) {
+	const m = MODELS.find((x) => x.id === id)
+	return m ? m.plain : String(id || '')
+}
 
 export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 

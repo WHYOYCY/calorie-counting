@@ -20,6 +20,18 @@
 			}
 		},
 		{
+			"path": "pages/settings/ai",
+			"style": {
+				"navigationBarTitleText": "拍照识别设置"
+			}
+		},
+		{
+			"path": "pages/settings/data",
+			"style": {
+				"navigationBarTitleText": "数据管理"
+			}
+		},
+		{
 			"path": "pages/record/edit",
 			"style": {
 				"navigationBarTitleText": "记录详情"

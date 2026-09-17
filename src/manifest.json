@@ -2,8 +2,8 @@
     "name" : "卡路里记录",
     "appid" : "__UNI__4CC86F8",
     "description" : "",
-    "versionName" : "1.0.0",
-    "versionCode" : "100",
+    "versionName" : "1.0.1",
+    "versionCode" : "101",
     "transformPx" : false,
     /* 关闭 uni 统计（本应用不需要，避免额外网络请求与隐私顾虑） */
     "uniStatistics" : {

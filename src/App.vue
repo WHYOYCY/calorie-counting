@@ -65,6 +65,14 @@
 		text-overflow: ellipsis;
 	}
 
+	/* 卡片分区标题：设置类的三个页面共用，所以放全局，只定义一次 */
+	.sec-title {
+		display: block;
+		font-size: 30rpx;
+		font-weight: 600;
+		line-height: 1.4;
+	}
+
 	/* ---------- 卡片：靠阴影分层，不靠描边 ---------- */
 	.card {
 		background: $c-card;

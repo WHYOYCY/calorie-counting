@@ -218,6 +218,29 @@ const alert = () => ({
 	holes: [roundRect(43, 29, 10, 25, 5), disc(48, 66, 6)],
 })
 
+/* ---------------- 「我的」页分区图标 ---------------- */
+// 目标：同心圆靶心（描边环 + 实心点）
+const target = () => ({ shapes: [ring(48, 48, 29, 7)], holes: [disc(48, 48, 9)] })
+const targetSolid = () => ({ shapes: [ring(48, 48, 29, 7), disc(48, 48, 10)] })
+
+// 数据管理：档案盒（盒身挖出标签槽 + 一横一竖的提手）
+const boxIcon = () => ({
+	shapes: [roundRect(11, 25, 74, 52, 11), segR(40, 44, 56, 44, 7)],
+	holes: [roundRect(30, 25, 36, 18, 5)],
+})
+
+// 设置与偏好：三条带滑块的轨道
+const tune = () => ({
+	shapes: [
+		segR(16, 30, 80, 30, 6),
+		segR(16, 48, 80, 48, 6),
+		segR(16, 66, 80, 66, 6),
+		disc(62, 30, 9),
+		disc(36, 48, 9),
+		disc(56, 66, 9),
+	],
+})
+
 /* ---------------- 餐次实物图标 ---------------- */
 // 日出：地平线 + 上半圆 + 三道光芒
 const sunrise = () => {
@@ -289,6 +312,11 @@ write(UI_DIR, 'chevron.png', UI, chevron, SOFT)
 write(UI_DIR, 'close.png', UI, close, SOFT)
 write(UI_DIR, 'close-white.png', UI, close, WHITE)
 write(UI_DIR, 'alert.png', UI, alert, ALERT)
+
+// 「我的」页：分区小图标（低饱和，别抢内容）
+write(UI_DIR, 'target.png', UI, target, GREEN)
+write(UI_DIR, 'box.png', UI, boxIcon, BLUE)
+write(UI_DIR, 'tune.png', UI, tune, VIOLET)
 
 console.log('\n餐次图标:')
 write(MEAL_DIR, 'breakfast.png', UI, sunrise, AMBER)

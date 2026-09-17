@@ -21,6 +21,8 @@
 - **时间分类** —— 按日期分组 + 按时间自动归类餐次（早/午/晚/加餐，含夜宵）
 - **汇总统计** —— 日 / 周 / 月视图、达标率、餐次分布、食物热量排行；
   另有**打卡热力图**（最近 13 周，五档深浅），点格子看那天的明细
+- **设置不堆一起** —— 「我的」只放每日目标与两个入口（拍照识别设置 / 数据管理），
+  技术配置收进二级页面，普通用户不会被 API Key 这类东西挡住
 - **备份与后悔药** —— 清空记录或覆盖导入前会自动在本机留一份快照（保留最近 3 份，可一键回滚）；
   （照片导出暂时下掉了，原因与后续计划见「待优化」）
 
@@ -38,6 +40,11 @@ npm run build:app  # 构建 App 资源，产物在 dist/build/app，用 HBuilder
 打包 APK 需要 [HBuilderX](https://www.dcloud.io/hbuilderx.html)（云打包）。
 
 ## 配置 API Key
+
+<p align="center">
+  <img src="docs/screenshots/settings-ai.png" width="42%" alt="拍照识别设置" />
+</p>
+
 
 App 内 **我的 → 拍照识别 → API Key** 填写阿里云百炼的 API Key，保存在本机。
 
@@ -119,7 +126,9 @@ src/
 ├── pages/
 │   ├── index/index.vue        # 记录：今日汇总 + 餐次列表 + 悬浮操作
 │   ├── stats/stats.vue        # 统计：日/周/月 + 图表 + 排行
-│   ├── settings/settings.vue  # 我的：API Key、目标、数据管理
+│   ├── settings/settings.vue  # 我的：概览、每日目标、两个入口
+│   ├── settings/ai.vue        # 拍照识别设置（API Key / 模型 / 接口地址）
+│   ├── settings/data.vue      # 数据管理（备份恢复 / 快照 / 清空 / 自检）
 │   └── record/edit.vue        # 记录详情：新增/编辑/删除、照片
 ├── static/                # 图标（由脚本生成，勿手改）
 ├── App.vue                # 全局样式
